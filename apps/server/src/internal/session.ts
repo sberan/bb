@@ -39,6 +39,15 @@ export function registerInternalSessionRoutes(app: Hono, deps: AppDeps): void {
     });
   });
 
+  get("/provider-bridge-policy", (context) => {
+    getAuthenticatedDaemon(context);
+    return context.json({
+      bridgeProtocolProviderPrefixes: getExperiments(deps.db).providerBridgeAcp
+        ? ["acp-"]
+        : [],
+    });
+  });
+
   post(
     "/session/open",
     hostDaemonSessionOpenRequestSchema,
