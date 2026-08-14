@@ -13,6 +13,7 @@ type CaffeinateSettingsDeps = Pick<
   | "lifecycleDedupers"
   | "logger"
   | "machineAuth"
+  | "providerRegistry"
   | "skillTreeRegistry"
   | "telemetry"
 >;

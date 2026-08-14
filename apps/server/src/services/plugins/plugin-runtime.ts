@@ -29,6 +29,7 @@ import {
 } from "./app-bundle.js";
 import { parsePluginSource } from "./install-sources.js";
 import { readPluginManifest, type PluginManifest } from "./manifest.js";
+import { buildPluginProviderRegistration } from "../providers/plugin-provider-registration.js";
 import {
   isPluginSdkRangeSatisfied,
   pluginSdkRangeProblem,
@@ -1092,6 +1093,34 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
           throw new Error("host shared-port control plane is unavailable");
         }
         deps.sharedPorts?.replaceDeclarationsForOwner(row.id, declarations);
+      },
+      registerProvider: (declaration) => {
+        if (!deps.providerRegistry) {
+          throw new Error("the provider registry is unavailable in this host");
+        }
+        return deps.providerRegistry.register({
+          ...buildPluginProviderRegistration({
+            pluginId: row.id,
+            declaration,
+          }),
+          pluginId: row.id,
+        });
+      },
+      isProviderIdTaken: (providerId) => {
+        if (!deps.providerRegistry) {
+          throw new Error("the provider registry is unavailable in this host");
+        }
+        // This plugin's own previous-load registrations are ignored: on
+        // reload they are disposed before the staged replacements flush, so
+        // re-declaring the same id is not a collision.
+        const existing = deps.providerRegistry.get(providerId);
+        return (
+          existing !== null &&
+          !(
+            existing.source.kind === "plugin" &&
+            existing.source.pluginId === row.id
+          )
+        );
       },
     });
     // Mutable trees are edited between loads, so invalidate the previous

@@ -77,6 +77,7 @@ export function onDaemonSocketOpen(
     | "logger"
     | "machineAuth"
     | "pendingInteractions"
+    | "providerRegistry"
     | "skillTreeRegistry"
     | "sharedPorts"
     | "telemetry"

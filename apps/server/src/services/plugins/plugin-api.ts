@@ -37,6 +37,7 @@ import type {
   PluginMentionItem,
   PluginMentionSearchContext,
   PluginMentionTrigger,
+  PluginProviderDeclaration,
   PluginRealtime,
   PluginRpc,
   PluginServerApi,
@@ -68,6 +69,7 @@ import {
   RESERVED_BB_CLI_COMMANDS,
   RPC_METHOD_PATTERN,
   summarizeParseIssues,
+  validatePluginProviderDeclaration,
 } from "@get-bb/plugin-sdk/internal/host-policy";
 import type { BbSdk, ThreadForkArgs, ThreadSpawnArgs } from "@bb/sdk";
 import type { ServerLogger } from "../../types.js";
@@ -384,6 +386,16 @@ export function createPluginApi(options: {
       ports: readonly number[];
     }[],
   ) => void;
+  /** Registers one validated provider declaration with the server's provider
+   * registry, bound to this plugin's id. Throws on a live id collision. */
+  registerProvider: (declaration: PluginProviderDeclaration) => {
+    dispose(): void;
+  };
+  /** True when a LIVE registration owned by core or another plugin already
+   * claims this provider id — the call-time collision check for staged
+   * registrations (this plugin's own previous-load entries are ignored:
+   * they are disposed before the staged replacements flush at activate). */
+  isProviderIdTaken: (providerId: string) => boolean;
 }): PluginApiHandle {
   const {
     pluginId,
@@ -401,6 +413,8 @@ export function createPluginApi(options: {
     validateSharedPortDeclaration,
     declareSharedPorts,
     replaceDeclaredSharedPorts,
+    registerProvider,
+    isProviderIdTaken,
   } = options;
   let invalidated = false;
   let activated = false;
@@ -778,6 +792,19 @@ export function createPluginApi(options: {
   };
 
   const agentTools: PluginAgentToolRecord[] = [];
+  /** Provider registrations from `experimental_registerProvider`, keyed by
+   * provider id. Entries staged before activation (`disposer === null`) are
+   * flushed into the registry at activate(), mirroring the declareSharedPorts
+   * staging pattern; each registration's dispose also rides disposeHooks so
+   * unload/reload removes the providers. */
+  const providerRegistrations = new Map<
+    string,
+    {
+      declaration: PluginProviderDeclaration;
+      disposer: { dispose(): void } | null;
+      disposed: boolean;
+    }
+  >();
   let agentConfigurationProvider: PluginAgentConfigurationProvider | null =
     null;
   let instructionProvider: PluginInstructionProvider | null = null;
@@ -805,6 +832,43 @@ export function createPluginApi(options: {
         );
       }
       instructionProvider = provider;
+    },
+    experimental_registerProvider(declaration) {
+      assertLive();
+      // Shared host policy: the fake host validates identically.
+      const normalized = validatePluginProviderDeclaration(declaration);
+      if (providerRegistrations.has(normalized.id)) {
+        throw new Error(
+          `Provider "${normalized.id}" is already registered; a plugin cannot shadow an existing provider.`,
+        );
+      }
+      const entry = {
+        declaration: normalized,
+        disposer: null as { dispose(): void } | null,
+        disposed: false,
+      };
+      if (activated) {
+        // Live registration: the registry enforces collisions itself.
+        entry.disposer = registerProvider(normalized);
+      } else if (isProviderIdTaken(normalized.id)) {
+        // Staged registration: surface the collision at call time so it
+        // fails the factory (and therefore the plugin load) like every other
+        // registration error, instead of exploding after the load commits.
+        throw new Error(
+          `Provider "${normalized.id}" is already registered; a plugin cannot shadow an existing provider.`,
+        );
+      }
+      providerRegistrations.set(normalized.id, entry);
+      const dispose = (): void => {
+        if (entry.disposed) return;
+        entry.disposed = true;
+        entry.disposer?.dispose();
+        if (providerRegistrations.get(normalized.id) === entry) {
+          providerRegistrations.delete(normalized.id);
+        }
+      };
+      disposeHooks.push(dispose);
+      return { dispose };
     },
     registerTool(tool: {
       name: string;
@@ -1178,6 +1242,14 @@ export function createPluginApi(options: {
       replaceDeclaredSharedPorts(
         [...pendingSharedPorts].map(([hostId, ports]) => ({ hostId, ports })),
       );
+      // Flush staged provider registrations into the live registry. On
+      // reload the previous instance was disposed before this runs, so
+      // re-declared ids are free again.
+      for (const entry of providerRegistrations.values()) {
+        if (!entry.disposed && entry.disposer === null) {
+          entry.disposer = registerProvider(entry.declaration);
+        }
+      }
       activated = true;
       pendingSharedPorts.clear();
       for (const problem of pendingAgentToolProblems) {
