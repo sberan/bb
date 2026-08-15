@@ -1072,6 +1072,11 @@ describe("host-daemon local schemas", () => {
 });
 
 describe("host-daemon command schemas", () => {
+  // Version 124 also collapses `host.delete_skill`'s per-provider scopes
+  // (`claude-user`, `codex-project`, …) to `provider-user` / `provider-project`;
+  // the daemon only ever distinguished bb roots from a server-supplied provider
+  // `rootPath`, and the old vocabulary could not name a plugin provider. An
+  // older daemon rejects the new scope values outright.
   // Version 124 adds the optional `bridgeLaunch` field beside every
   // `acpLaunchSpec` site (thread.start, the resume contexts,
   // thread.goal.clear, provider.list_models) so plugin providers can deliver
@@ -2783,7 +2788,7 @@ describe("host-daemon command schemas", () => {
     expect(
       hostDaemonOnlineRpcCommandSchema.safeParse({
         ...base,
-        scope: "claude-user",
+        scope: "provider-user",
       }).success,
     ).toBe(false);
   });
