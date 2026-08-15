@@ -149,6 +149,12 @@ export async function resolveRuntimeBridgeLaunch(
     ...(bridgeLaunch.providerOptions !== undefined
       ? { providerOptions: bridgeLaunch.providerOptions }
       : {}),
+    capabilities: {
+      supportsServiceTier: bridgeLaunch.capabilities.supportsServiceTier,
+      supportedPermissionModes: [
+        ...bridgeLaunch.capabilities.supportedPermissionModes,
+      ],
+    },
   };
 }
 

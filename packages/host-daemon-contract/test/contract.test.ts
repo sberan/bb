@@ -2276,6 +2276,10 @@ describe("host-daemon command schemas", () => {
         byteLength: 4096,
       },
       providerOptions: { echoPrefix: "echo:" },
+      capabilities: {
+        supportsServiceTier: true,
+        supportedPermissionModes: ["accept-edits", "full"],
+      },
     };
 
     const providerListModelsCommand = {
