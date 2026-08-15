@@ -35,6 +35,7 @@ import { registerInternalHostRoutes } from "./internal/hosts.js";
 import { registerInternalInteractiveRequestRoutes } from "./internal/interactive-requests.js";
 import { registerInternalSessionRoutes } from "./internal/session.js";
 import { registerInternalSkillRoutes } from "./internal/skills.js";
+import { registerInternalProviderBridgeRoutes } from "./internal/provider-bridges.js";
 import { registerInternalToolCallRoutes } from "./internal/tool-calls.js";
 import {
   setAuthenticatedDaemon,
@@ -411,6 +412,7 @@ export function createApp(
     appVersion: deps.config.appVersion,
     sharedPorts: deps.sharedPorts,
     providerRegistry: deps.providerRegistry,
+    providerBridgeArtifacts: deps.providerBridgeArtifacts,
     ensureSharedPortTunnel: (hostId) =>
       deps.sharedPorts.ensureTunnelIdentity(hostId, () =>
         callHostRetryableOnlineRpc(deps, {
@@ -483,6 +485,7 @@ export function createApp(
   registerInternalHostRoutes(internalApi, deps);
   registerInternalSessionRoutes(internalApi, deps);
   registerInternalSkillRoutes(internalApi, deps);
+  registerInternalProviderBridgeRoutes(internalApi, deps);
   registerInternalEventRoutes(internalApi, deps);
   registerInternalToolCallRoutes(internalApi, deps);
   registerInternalInteractiveRequestRoutes(internalApi, deps);

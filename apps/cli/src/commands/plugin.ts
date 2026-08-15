@@ -31,6 +31,7 @@ import { action } from "../action.js";
 import { cliFetch, createCliBbSdk } from "../client.js";
 import {
   buildPluginApp,
+  buildPluginProviderBridge,
   buildPluginServer,
   createPluginDevLoop,
   PLUGIN_TOOLCHAIN_PINS,
@@ -146,6 +147,7 @@ const pluginManifestSchema = z.object({
     .object({
       server: z.unknown().optional(),
       app: z.unknown().optional(),
+      providerBridge: z.unknown().optional(),
     })
     .optional(),
 });
@@ -1490,7 +1492,7 @@ export function registerPluginCommands(
   plugin
     .command("build [path]")
     .description(
-      "Compile the plugin into dist/: the bb.server backend bundle (server.js, server.meta.json) and, when bb.app is declared, the frontend bundle (app.js, app.css, app.meta.json); each *.meta.json stamps SDK/identity metadata; no server required",
+      "Compile the plugin into dist/: the bb.server backend bundle (server.js, server.meta.json), when bb.app is declared, the frontend bundle (app.js, app.css, app.meta.json), and, when bb.providerBridge is declared, the self-contained provider bridge (provider-bridge.mjs, provider-bridge.meta.json with its sha256/byteLength); no server required",
     )
     .action(
       action(async (path: string | undefined) => {
@@ -1515,6 +1517,10 @@ export function registerPluginCommands(
           const app = await buildPluginApp(rootDir, bbVersion, toolchain);
           files.push(app.jsPath, app.cssPath, app.metaPath);
         }
+        if (typeof manifest?.bb?.providerBridge === "string") {
+          const bridge = await buildPluginProviderBridge(rootDir, toolchain);
+          files.push(bridge.jsPath, bridge.metaPath);
+        }
         for (const file of files) {
           console.log(relative(process.cwd(), file));
         }
@@ -1524,7 +1530,7 @@ export function registerPluginCommands(
   plugin
     .command("dev [path]")
     .description(
-      "Watch a plugin's sources: rebuild its frontend bundle (if it has one) and reload it on every change (Ctrl+C to stop)",
+      "Watch a plugin's sources: rebuild its frontend bundle and provider bridge (when declared) and reload it on every change (Ctrl+C to stop)",
     )
     .action(
       action(async (path: string | undefined) => {
@@ -1549,6 +1555,8 @@ export function registerPluginCommands(
           );
           process.exit(1);
         }
+        const hasProviderBridge =
+          typeof manifest.bb?.providerBridge === "string";
         const loop = createPluginDevLoop({
           pluginId: entry.id,
           hasApp,
@@ -1558,6 +1566,10 @@ export function registerPluginCommands(
               resolveBbCliVersion(),
               await cliBuildToolchain(),
             );
+          },
+          hasProviderBridge,
+          buildProviderBridge: async () => {
+            await buildPluginProviderBridge(rootDir, await cliBuildToolchain());
           },
           reloadPlugin: async () => {
             const result = pluginMutationResultSchema.parse(

@@ -11,6 +11,7 @@ import { PendingInteractionLifecycle } from "../../src/services/interactions/pen
 import { createMachineAuthService } from "../../src/services/machine-auth.js";
 import { createProviderRegistryService } from "../../src/services/providers/provider-registry.js";
 import { SkillTreeRegistry } from "../../src/services/skills/injected-skills.js";
+import { ProviderBridgeArtifactRegistry } from "../../src/services/plugins/provider-bridge-artifacts.js";
 import {
   createAppVersionService,
   type AppVersionService,
@@ -169,6 +170,7 @@ export async function createTestAppHarness(
   });
   const telemetry = createNoopTelemetryService();
   const skillTreeRegistry = new SkillTreeRegistry();
+  const providerBridgeArtifacts = new ProviderBridgeArtifactRegistry();
   const pendingInteractions = new PendingInteractionLifecycle({
     config,
     db,
@@ -177,6 +179,7 @@ export async function createTestAppHarness(
     logger: testLogger,
     machineAuth: testMachineAuth,
     providerRegistry,
+    providerBridgeArtifacts,
     skillTreeRegistry,
     telemetry,
     terminalSessions,
@@ -199,6 +202,7 @@ export async function createTestAppHarness(
     machineAuth: testMachineAuth,
     pendingInteractions,
     providerRegistry,
+    providerBridgeArtifacts,
     skillTreeRegistry,
     telemetry,
     terminalSessions,

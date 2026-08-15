@@ -14,6 +14,7 @@ type CaffeinateSettingsDeps = Pick<
   | "logger"
   | "machineAuth"
   | "providerRegistry"
+  | "providerBridgeArtifacts"
   | "skillTreeRegistry"
   | "telemetry"
 >;

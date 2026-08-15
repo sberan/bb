@@ -7,7 +7,11 @@ import { performance } from "node:perf_hooks";
 import { createJiti } from "jiti";
 import semver from "semver";
 import { PLUGIN_SDK_MAJOR, PLUGIN_SDK_VERSION, type Thread } from "@bb/domain";
-import { buildPluginApp } from "@bb/plugin-build";
+import { buildPluginApp, buildPluginProviderBridge } from "@bb/plugin-build";
+import {
+  readPluginProviderBridgeArtifact,
+  type PluginProviderBridgeArtifact,
+} from "./provider-bridge-artifacts.js";
 import { getPluginBuildToolchain } from "./build-toolchain.js";
 import { createNodeBbSdk, type BbSdk } from "@bb/sdk";
 import {
@@ -952,6 +956,55 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     };
   }
 
+  /**
+   * Refresh a plugin's provider-bridge artifact for this load. Mutable
+   * sources (path:/source-builtin) rebuild every load so the recorded
+   * {sha256, byteLength} always describes the current sources; managed
+   * git/npm artifacts are immutable after promotion and must already carry a
+   * hash-consistent bundle (git builds it at install; npm ships it prebuilt).
+   */
+  async function loadProviderBridgeCandidate(
+    row: InstalledPluginRow,
+    manifest: PluginManifest,
+  ): Promise<{
+    artifact: PluginProviderBridgeArtifact | null;
+    problem: string | null;
+  }> {
+    if (manifest.providerBridgeEntry === undefined) {
+      return { artifact: null, problem: null };
+    }
+    const kind = row.sourceKind;
+    const mutableSource =
+      (kind === "path" || kind === "builtin") &&
+      !isPackagedBuiltinServerEntry({ kind, manifest, rootDir: row.rootDir });
+    if (mutableSource) {
+      try {
+        await buildPluginProviderBridge(
+          row.rootDir,
+          await getPluginBuildToolchain(deps),
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warn(
+          `plugin ${row.id}: provider bridge build failed: ${message}`,
+        );
+        return {
+          artifact: null,
+          problem: `provider bridge build failed: ${message}`,
+        };
+      }
+    }
+    const artifact = await readPluginProviderBridgeArtifact(row.rootDir);
+    if (artifact === null) {
+      return {
+        artifact: null,
+        problem:
+          "provider bridge artifact is missing or does not match its recorded hash — rebuild with `bb plugin build`",
+      };
+    }
+    return { artifact, problem: null };
+  }
+
   // Best-effort static identity for the inventory + logo asset route,
   // independent of whether the plugin loads. A plugin whose manifest can't be
   // read (missing/corrupt) simply has no identity to show — it falls back to
@@ -1031,6 +1084,10 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     // Build candidate assets without publishing them; a failed reload keeps
     // the previous backend and frontend registration sets together.
     const appBundleCandidate = await loadAppBundleCandidate(row, manifest);
+    const providerBridgeCandidate = await loadProviderBridgeCandidate(
+      row,
+      manifest,
+    );
     // Branding refresh rides every load too, so `bb plugin reload` picks up a
     // changed compact icon or logo file.
     const brandingAssetCandidate = await loadPluginBrandingAssets(
@@ -1227,6 +1284,14 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     // every dispatcher continues to resolve the complete previous handle.
     loaded.set(row.id, plugin);
     appBundles.set(row.id, appBundleCandidate.snapshot);
+    // Publish the provider-bridge artifact into the shared registry (the
+    // dispose path removed the previous load's entry): presence there means
+    // the plugin runtime is live and its bridge bytes are servable.
+    if (providerBridgeCandidate.artifact !== null) {
+      deps.providerBridgeArtifacts?.set(row.id, providerBridgeCandidate.artifact);
+    } else {
+      deps.providerBridgeArtifacts?.delete(row.id);
+    }
     brandingAssets.set(row.id, brandingAssetCandidate);
     needsConfiguration.delete(row.id);
     agentToolProblems.delete(row.id);
@@ -1260,6 +1325,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       const details = [
         agentToolProblems.get(row.id),
         appBundleCandidate.problem,
+        providerBridgeCandidate.problem,
       ].filter((detail): detail is string => typeof detail === "string");
       setStatus(
         row.id,
@@ -1313,6 +1379,9 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     } finally {
       plugin.handle.invalidate();
       disposingPluginIds.delete(id);
+      // The bridge artifact belongs to the disposed runtime; a reload's
+      // commit republishes the fresh one right after.
+      deps.providerBridgeArtifacts?.delete(id);
     }
   }
 
@@ -1339,6 +1408,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     baseStatuses.delete(id);
     devBuildProblems.delete(id);
     appBundles.delete(id);
+    deps.providerBridgeArtifacts?.delete(id);
     brandingAssets.delete(id);
     needsConfiguration.delete(id);
     agentToolProblems.delete(id);

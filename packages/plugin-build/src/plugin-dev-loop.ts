@@ -11,6 +11,9 @@ export interface PluginDevLoopDeps {
   pluginId: string;
   hasApp: boolean;
   buildApp: () => Promise<void>;
+  /** True when the manifest declares `bb.providerBridge`. */
+  hasProviderBridge?: boolean;
+  buildProviderBridge?: () => Promise<void>;
   reloadPlugin: () => Promise<void>;
   log: (line: string) => void;
   debounceMs?: number;
@@ -48,6 +51,19 @@ export function createPluginDevLoop(deps: PluginDevLoopDeps): PluginDevLoop {
         );
       } catch (error) {
         parts.push(`build failed: ${errorMessage(error)}`);
+        deps.log(`${parts.join(" · ")} — fix and save to retry`);
+        return;
+      }
+    }
+    if (deps.hasProviderBridge === true && deps.buildProviderBridge) {
+      const startedAt = now();
+      try {
+        await deps.buildProviderBridge();
+        parts.push(
+          `rebuilt provider bridge in ${Math.max(0, Math.round(now() - startedAt))}ms`,
+        );
+      } catch (error) {
+        parts.push(`bridge build failed: ${errorMessage(error)}`);
         deps.log(`${parts.join(" · ")} — fix and save to retry`);
         return;
       }

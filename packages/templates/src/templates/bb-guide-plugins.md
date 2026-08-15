@@ -222,17 +222,24 @@ added/updated/unchanged counts.
                                  terminal). The old layout keeps working, so
                                  nothing migrates unless you ask
   bb plugin build [path]         Compile the plugin into dist/ — the backend
-                                 bundle (server.js, server.meta.json) and,
-                                 when bb.app is declared, the frontend bundle
-                                 (app.js, app.css, app.meta.json). Each
-                                 *.meta.json is stamped with SDK major/version,
-                                 artifactFormatVersion, pluginId, pluginVersion,
-                                 and builtWith (bb + plugin SDK versions); no
-                                 server required
+                                 bundle (server.js, server.meta.json), when
+                                 bb.app is declared, the frontend bundle
+                                 (app.js, app.css, app.meta.json), and, when
+                                 bb.providerBridge is declared, the
+                                 self-contained provider bridge
+                                 (provider-bridge.mjs plus
+                                 provider-bridge.meta.json recording its
+                                 sha256 and byteLength — host daemons fetch
+                                 and verify the bundle by that hash). The
+                                 server/app *.meta.json are stamped with SDK
+                                 major/version, artifactFormatVersion,
+                                 pluginId, pluginVersion, and builtWith (bb +
+                                 plugin SDK versions); no server required
   bb plugin dev [path]           Watch a plugin's sources (default: cwd) and
                                  on every change rebuild its frontend bundle
-                                 (if it declares bb.app) and reload the
-                                 plugin; Ctrl+C to stop
+                                 (if it declares bb.app) and provider bridge
+                                 (if it declares bb.providerBridge), then
+                                 reload the plugin; Ctrl+C to stop
 
   bb marketplace add <source>    Add a marketplace from an https manifest URL,
                                  git:<url>[@<ref>], or path:<directory>. bb

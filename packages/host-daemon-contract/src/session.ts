@@ -816,6 +816,13 @@ export type HostDaemonInternalSchema = {
     /** Used by the daemon to pull a missing server-owned injected skill tree. */
     $get: Endpoint<Record<never, never>, HostDaemonSkillTree, 200>;
   };
+  "/provider-bridges/:sha256": {
+    /** Used by the daemon to pull a plugin provider's bridge bundle by content
+     *  hash. The daemon verifies the sha256 over the received bytes before
+     *  caching or executing them. Additive route (same pattern as
+     *  /provider-bridge-policy): old daemons never call it. */
+    $get: Endpoint<Record<never, never>, Uint8Array, 200, "binary">;
+  };
   "/hosts/enroll-key": {
     /** Used by the local launcher to request one-time bootstrap material for the primary host daemon. */
     $post: Endpoint<

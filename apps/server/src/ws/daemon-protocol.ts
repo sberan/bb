@@ -78,6 +78,7 @@ export function onDaemonSocketOpen(
     | "machineAuth"
     | "pendingInteractions"
     | "providerRegistry"
+    | "providerBridgeArtifacts"
     | "skillTreeRegistry"
     | "sharedPorts"
     | "telemetry"
