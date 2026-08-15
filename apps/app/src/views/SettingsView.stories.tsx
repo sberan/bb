@@ -345,13 +345,6 @@ function ExperimentsStory() {
       disabled={false}
       editMessagesEnabled={state.experiments.editMessages}
       newOnboardingEnabled={state.experiments.newOnboarding}
-      providerBridgeEnabled={state.experiments.providerBridge ?? false}
-      onProviderBridgeEnabledChange={(enabled) =>
-        state.setExperiments((current) => ({
-          ...current,
-          providerBridge: enabled,
-        }))
-      }
       providerSessionReapingEnabled={state.experiments.providerSessionReaping}
       onClaudeCodeMockCliTrafficEnabledChange={(enabled) =>
         state.setExperiments((current) => ({
