@@ -4,20 +4,23 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   useSyncExternalStore,
 } from "react";
 import type { ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { useLocation } from "react-router-dom";
+import { useStore } from "jotai";
 import {
   isBackgroundAgentTaskType,
   isBackgroundCommandTaskType,
+  ThreadOriginKind,
 } from "@bb/domain";
 import type {
   PromptInput,
-  ThreadOriginKind,
   ThreadRuntimeDisplayStatus,
 } from "@bb/domain";
 import type {
@@ -86,6 +89,8 @@ import { AutoHeightContainer } from "../../ui/height-transition.js";
 import { Icon, type IconName } from "@bb/shared-ui/icon";
 import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
 import { useBottomAnchoredScroll } from "@/components/ui/bottom-anchored-scroll-body.js";
+import { useIsCompactViewport } from "@bb/shared-ui/hooks/use-compact-viewport";
+import { threadTimelineScrollAnchorAtomFamily } from "@/lib/thread-timeline-scroll-anchor.js";
 import {
   collectSearchedMessageAncestorRowIds,
   readSearchMessageTarget,
@@ -132,8 +137,8 @@ export interface ThreadTimelineRowsProps {
    */
   canSpawnChild?: boolean;
   /**
-   * Origin of the rendered thread (`fork`), or null for ordinary threads.
-   * Selects the fork leading icon on the seed-without-run anchor.
+   * Origin of the rendered thread as a child (`fork` / `side-chat`), or null for
+   * root threads. Selects the fork leading icon on the seed-without-run anchor.
    */
   threadOriginKind?: ThreadOriginKind | null;
   /** Fork the rendered thread from a specific agent message. */
@@ -275,6 +280,45 @@ interface TimelineRowsListProps {
   unreadDividerPlacement: ThreadTimelineUnreadDividerPlacement | null;
 }
 
+interface TimelineWindowItemController {
+  handleIntersection: (entry: IntersectionObserverEntry) => void;
+  realize: () => void;
+  /** Revert a just-realized item to its unchanged placeholder. */
+  derealize: () => void;
+  /** The current placeholder height, or null while the item is realized. */
+  peekPlaceholderHeight: () => number | null;
+  /** Grow or shrink the placeholder (clamped at zero) to absorb a height delta. */
+  adjustPlaceholderHeight: (delta: number) => void;
+  /**
+   * Whether the item has ever mounted its real content. A false value means
+   * its placeholder height is still a pure estimate, eligible for
+   * re-budgeting; a true value means the placeholder carries a measurement.
+   */
+  hasEverRealized: () => boolean;
+  /** Release an interaction pin so the row can derealize on its next exit. */
+  unpin: () => void;
+}
+
+interface TimelineVisibleAnchor {
+  element: HTMLDivElement;
+  top: number;
+}
+
+interface TimelineWindowedListItemProps {
+  alwaysRealized: boolean;
+  children: ReactNode;
+  estimatedHeight: number;
+  initiallyRealized: boolean;
+  itemKey: string;
+  registerWrapper: (key: string, node: HTMLDivElement | null) => void;
+  registerController: (
+    key: string,
+    controller: TimelineWindowItemController | null,
+  ) => void;
+  registerInteractionPin: (key: string) => void;
+  rowId: string | undefined;
+}
+
 interface TimelineUnreadDividerProps {
   autoScroll: boolean;
 }
@@ -400,6 +444,86 @@ type TimelineRowsListItem =
       kind: "unread-divider";
       id: "thread-unread-divider";
     };
+
+const TIMELINE_WINDOWING_MIN_ITEM_COUNT = 40;
+const TIMELINE_WINDOW_MARGIN_PX = 1_000;
+const TIMELINE_WINDOW_FALLBACK_VIEWPORT_HEIGHT_PX = 800;
+// Interaction pins keep rows mounted so their local state (expansion,
+// long-message reveal) survives eviction. Cap them so a long session of taps
+// cannot keep every heavy row realized forever: the oldest pin releases
+// first, and its row derealizes on its next window exit.
+const TIMELINE_WINDOW_MAX_INTERACTION_PINS = 24;
+// Re-budgeting replaces never-measured placeholder estimates with the running
+// average of measured rows once the scroll idles, so the donor pool tracks
+// the timeline's real heights instead of draining monotonically.
+const TIMELINE_WINDOW_REBUDGET_MIN_SAMPLES = 8;
+const TIMELINE_WINDOW_REBUDGET_DRIFT_PX = 24;
+const TIMELINE_WINDOW_REBUDGET_IDLE_DELAY_MS = 300;
+const TIMELINE_WINDOW_REBUDGET_MAX_ESTIMATE_PX = 1_000;
+
+function timelineListItemKey(item: TimelineRowsListItem): string {
+  return item.kind === "row" ? item.row.id : item.id;
+}
+
+function estimateTimelineListItemHeight(item: TimelineRowsListItem): number {
+  if (item.kind === "unread-divider") {
+    return 24;
+  }
+  if (item.row.kind === "conversation") {
+    return 120;
+  }
+  return 40;
+}
+
+function collectTimelineWindowKeys({
+  centerIndex,
+  items,
+}: {
+  centerIndex: number;
+  items: readonly TimelineRowsListItem[];
+}): ReadonlySet<string> {
+  if (items.length === 0) {
+    return EMPTY_ROW_ID_SET;
+  }
+
+  const keys = new Set<string>();
+  const boundedCenterIndex = Math.max(
+    0,
+    Math.min(centerIndex, items.length - 1),
+  );
+  const coverage =
+    TIMELINE_WINDOW_MARGIN_PX + TIMELINE_WINDOW_FALLBACK_VIEWPORT_HEIGHT_PX;
+
+  let beforeHeight = 0;
+  for (
+    let index = boundedCenterIndex;
+    index >= 0 && beforeHeight <= coverage;
+    index -= 1
+  ) {
+    const item = items[index];
+    if (item === undefined) {
+      break;
+    }
+    keys.add(timelineListItemKey(item));
+    beforeHeight += estimateTimelineListItemHeight(item);
+  }
+
+  let afterHeight = 0;
+  for (
+    let index = boundedCenterIndex + 1;
+    index < items.length && afterHeight <= coverage;
+    index += 1
+  ) {
+    const item = items[index];
+    if (item === undefined) {
+      break;
+    }
+    keys.add(timelineListItemKey(item));
+    afterHeight += estimateTimelineListItemHeight(item);
+  }
+
+  return keys;
+}
 
 interface ConversationRowProps {
   row: TimelineConversationViewRow;
@@ -631,20 +755,6 @@ function timelineRowsOwnerKey({
   return ownerThreadId;
 }
 
-function timelineHeightSnapRevision(rows: readonly TimelineRow[]): string {
-  // Active turns render their work rows directly. Completion replaces those
-  // rows with one or more turn summaries plus the terminal message. Key the
-  // height container by the newest completed summary so that authoritative
-  // topology replacement snaps instead of looking like a second stream.
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const row = rows[index];
-    if (row?.kind === "turn") {
-      return `${row.id}:${row.sourceSeqStart}:${row.sourceSeqEnd}`;
-    }
-  }
-  return "active";
-}
-
 function useTimelineViewRowsCache(): GetTimelineViewRows {
   // Each `rawRows` reference is consumed under exactly one scope: the
   // top-level prop ("open" — pending work may still arrive) or a lazily
@@ -733,19 +843,14 @@ function TimelineStaticRow({
   );
 }
 
-/**
- * Vertical rhythm between timeline rows. Most rows are a single 20px line (a
- * command, a file edit, a bundle summary), so the gap is the dominant cost of
- * the thread view: the list stays readable at 8px and reads as dense work
- * rather than as isolated cards. Bundle children run flush inside their group.
- */
 function timelineRowsListGapClassName(
   spacing: TimelineRowsListSpacing,
 ): string {
   switch (spacing) {
     case "top-level":
+      return "gap-4";
     case "nested":
-      return "gap-2";
+      return "gap-3";
     case "bundle":
       return "gap-0";
   }
@@ -758,7 +863,7 @@ function timelineRowsListGapClassName(
  * first executed turn), which distinguishes it from a *later* cross-thread agent
  * message in the same thread (those belong to a turn, so `turnId` is non-null).
  * Only this row should take the fork leading icon; later cross-thread agent rows
- * keep their per-sourceKind icon even though the thread's `originKind` is fork.
+ * keep their per-sourceKind icon even though the thread's `childOrigin` is fork.
  */
 function isForkSeedAnchorRow(row: TimelineConversationViewRow): boolean {
   return (
@@ -994,7 +1099,7 @@ function ConversationRow({
       row.senderThreadId === null
         ? null
         : (senderThreadMetadataById.get(row.senderThreadId) ?? null);
-    // The fork leading icon is the thread's `originKind`, but only on the seed
+    // The fork leading icon is the thread's `childOrigin`, but only on the seed
     // anchor (thread-start) row — pass null for every other generated row so a
     // later cross-thread agent message in a forked thread keeps its own icon.
     const originKind = isForkSeedAnchorRow(row) ? threadOriginKind : null;
@@ -1864,6 +1969,191 @@ function buildTimelineRowsListItems({
   return items;
 }
 
+function TimelineWindowedListItem({
+  alwaysRealized,
+  children,
+  estimatedHeight,
+  initiallyRealized,
+  itemKey,
+  registerWrapper,
+  registerController,
+  registerInteractionPin,
+  rowId,
+}: TimelineWindowedListItemProps) {
+  const [locallyRealized, setLocallyRealized] = useState(initiallyRealized);
+  const [placeholderHeight, setPlaceholderHeight] = useState(estimatedHeight);
+  // Mirrors the placeholder-height state so the window controller can read
+  // and adjust it synchronously between two flushSync commits in one task.
+  const placeholderHeightRef = useRef(estimatedHeight);
+  const locallyRealizedRef = useRef(locallyRealized);
+  const alwaysRealizedRef = useRef(alwaysRealized);
+  const everRealizedRef = useRef(initiallyRealized || alwaysRealized);
+  const interactionPinnedRef = useRef(false);
+  const lastIntersectionRef = useRef<boolean | null>(null);
+  useLayoutEffect(() => {
+    locallyRealizedRef.current = locallyRealized;
+    alwaysRealizedRef.current = alwaysRealized;
+  }, [alwaysRealized, locallyRealized]);
+
+  const updateLocallyRealized = useCallback((next: boolean) => {
+    if (next) {
+      everRealizedRef.current = true;
+    }
+    if (locallyRealizedRef.current === next) {
+      return;
+    }
+    locallyRealizedRef.current = next;
+    setLocallyRealized(next);
+  }, []);
+  const applyPlaceholderHeight = useCallback((next: number) => {
+    placeholderHeightRef.current = next;
+    setPlaceholderHeight(next);
+  }, []);
+  const controller = useMemo<TimelineWindowItemController>(
+    () => ({
+      handleIntersection: (entry) => {
+        lastIntersectionRef.current = entry.isIntersecting;
+        if (entry.isIntersecting) {
+          updateLocallyRealized(true);
+          return;
+        }
+        if (entry.boundingClientRect.height > 0) {
+          applyPlaceholderHeight(entry.boundingClientRect.height);
+        }
+        if (!alwaysRealizedRef.current && !interactionPinnedRef.current) {
+          updateLocallyRealized(false);
+        }
+      },
+      // Applies a realization outside an intersection entry (scroll-time
+      // realization or the idle flush). The item is intersecting when this
+      // runs, so the last-intersection state matches what handleIntersection
+      // would have set.
+      realize: () => {
+        lastIntersectionRef.current = true;
+        updateLocallyRealized(true);
+      },
+      derealize: () => {
+        updateLocallyRealized(false);
+      },
+      peekPlaceholderHeight: () =>
+        alwaysRealizedRef.current || locallyRealizedRef.current
+          ? null
+          : placeholderHeightRef.current,
+      adjustPlaceholderHeight: (delta) => {
+        applyPlaceholderHeight(
+          Math.max(0, placeholderHeightRef.current + delta),
+        );
+      },
+      hasEverRealized: () => everRealizedRef.current,
+      unpin: () => {
+        interactionPinnedRef.current = false;
+      },
+    }),
+    [applyPlaceholderHeight, updateLocallyRealized],
+  );
+  useLayoutEffect(() => {
+    registerController(itemKey, controller);
+    return () => registerController(itemKey, null);
+  }, [controller, itemKey, registerController]);
+  useLayoutEffect(() => {
+    if (
+      !alwaysRealized &&
+      lastIntersectionRef.current === false &&
+      !interactionPinnedRef.current
+    ) {
+      const frame = requestAnimationFrame(() => updateLocallyRealized(false));
+      return () => cancelAnimationFrame(frame);
+    }
+  }, [alwaysRealized, updateLocallyRealized]);
+
+  const pinInteractedItem = useCallback(() => {
+    interactionPinnedRef.current = true;
+    // Reporting every interaction (not just the first) keeps the list-level
+    // pin order in recency order, so the least-recently-touched pin evicts.
+    registerInteractionPin(itemKey);
+  }, [itemKey, registerInteractionPin]);
+  const handleWrapperRef = useCallback(
+    (node: HTMLDivElement | null) => registerWrapper(itemKey, node),
+    [itemKey, registerWrapper],
+  );
+  const isRealized = alwaysRealized || locallyRealized;
+
+  return (
+    <div
+      ref={handleWrapperRef}
+      data-timeline-row-id={rowId}
+      data-timeline-row-realized={isRealized ? "true" : "false"}
+      aria-hidden={isRealized ? undefined : true}
+      style={isRealized ? undefined : { height: placeholderHeight }}
+      onClickCapture={pinInteractedItem}
+      onFocusCapture={pinInteractedItem}
+    >
+      {isRealized ? children : null}
+    </div>
+  );
+}
+
+function captureTimelineVisibleAnchor({
+  orderedKeys,
+  scrollElement,
+  wrapperByKey,
+}: {
+  orderedKeys: readonly string[];
+  scrollElement: HTMLElement;
+  wrapperByKey: ReadonlyMap<string, HTMLDivElement>;
+}): TimelineVisibleAnchor | null {
+  const scrollRect = scrollElement.getBoundingClientRect();
+  let low = 0;
+  let high = orderedKeys.length - 1;
+  let firstVisibleIndex = orderedKeys.length;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const key = orderedKeys[middle];
+    const element = key === undefined ? undefined : wrapperByKey.get(key);
+    if (element === undefined) {
+      return null;
+    }
+    if (element.getBoundingClientRect().bottom > scrollRect.top) {
+      firstVisibleIndex = middle;
+      high = middle - 1;
+    } else {
+      low = middle + 1;
+    }
+  }
+  const key = orderedKeys[firstVisibleIndex];
+  const element = key === undefined ? undefined : wrapperByKey.get(key);
+  if (element === undefined) {
+    return null;
+  }
+  const rect = element.getBoundingClientRect();
+  return rect.top < scrollRect.bottom ? { element, top: rect.top } : null;
+}
+
+function restoreTimelineVisibleAnchor({
+  anchor,
+  scrollElement,
+  wasAtBottom,
+}: {
+  anchor: TimelineVisibleAnchor | null;
+  scrollElement: HTMLElement;
+  wasAtBottom: boolean;
+}): void {
+  if (wasAtBottom) {
+    scrollElement.scrollTop = Math.max(
+      0,
+      scrollElement.scrollHeight - scrollElement.clientHeight,
+    );
+    return;
+  }
+  if (anchor === null || !anchor.element.isConnected) {
+    return;
+  }
+  const topDelta = anchor.element.getBoundingClientRect().top - anchor.top;
+  if (Math.abs(topDelta) > 0.5) {
+    scrollElement.scrollTop += topDelta;
+  }
+}
+
 function TimelineRowsList({
   compactActivityIntents,
   hasOlderTimelineRows,
@@ -1878,13 +2168,12 @@ function TimelineRowsList({
   unreadDividerPlacement,
 }: TimelineRowsListProps) {
   const { threadId } = useTimelineRendererStaticContext();
+  const isCompactViewport = useIsCompactViewport();
+  const bottomAnchor = useBottomAnchoredScroll();
+  const store = useStore();
+  const location = useLocation();
   const searchExpandedRowIds = useTimelineSearchExpansionRowIds(rows);
   const stableSearchExpandedRowIds = useStableReadonlySet(searchExpandedRowIds);
-  useScrollToSearchedMessage(rows, threadId, {
-    hasOlderRows: hasOlderTimelineRows,
-    isLoadingOlderRows: isLoadingOlderTimelineRows,
-    onLoadOlderRows,
-  });
   const activeLatestBundleId = useMemo(
     () => findActiveLatestBundleId(rows),
     [rows],
@@ -1893,7 +2182,643 @@ function TimelineRowsList({
     () => buildTimelineRowsListItems({ rows, unreadDividerPlacement }),
     [rows, unreadDividerPlacement],
   );
-  return (
+  const itemKeys = useMemo(() => items.map(timelineListItemKey), [items]);
+  const shouldWindow =
+    spacing === "top-level" &&
+    isCompactViewport &&
+    bottomAnchor !== null &&
+    typeof IntersectionObserver !== "undefined" &&
+    items.length >= TIMELINE_WINDOWING_MIN_ITEM_COUNT;
+  const searchTarget = useMemo(
+    () => readSearchMessageTarget(location.state),
+    [location.state],
+  );
+  const searchTargetsTimeline =
+    searchTarget !== null &&
+    (threadId === undefined ||
+      searchTarget.threadId === null ||
+      searchTarget.threadId === threadId);
+  const initialWindowCenterIndex = useMemo(() => {
+    if (searchTarget !== null && searchTargetsTimeline) {
+      const searchIndex = items.findIndex(
+        (item) =>
+          item.kind === "row" &&
+          item.row.sourceSeqStart <= searchTarget.seq &&
+          searchTarget.seq <= item.row.sourceSeqEnd,
+      );
+      if (searchIndex >= 0) {
+        return searchIndex;
+      }
+    }
+
+    if (unreadDividerAutoScroll) {
+      const dividerIndex = items.findIndex(
+        (item) => item.kind === "unread-divider",
+      );
+      if (dividerIndex >= 0) {
+        return dividerIndex;
+      }
+    }
+
+    if (threadId !== undefined) {
+      const anchor = store.get(threadTimelineScrollAnchorAtomFamily(threadId));
+      if (anchor !== null && !anchor.atBottom && anchor.rowId.length > 0) {
+        const anchorIndex = items.findIndex(
+          (item) => item.kind === "row" && item.row.id === anchor.rowId,
+        );
+        if (anchorIndex >= 0) {
+          return anchorIndex;
+        }
+      }
+    }
+
+    return Math.max(0, items.length - 1);
+  }, [
+    items,
+    searchTarget,
+    searchTargetsTimeline,
+    store,
+    threadId,
+    unreadDividerAutoScroll,
+  ]);
+  const initiallyRealizedKeys = useMemo(
+    () =>
+      shouldWindow
+        ? collectTimelineWindowKeys({
+            centerIndex: initialWindowCenterIndex,
+            items,
+          })
+        : EMPTY_ROW_ID_SET,
+    [initialWindowCenterIndex, items, shouldWindow],
+  );
+  const wrapperByKeyRef = useRef(new Map<string, HTMLDivElement>());
+  const keyByWrapperRef = useRef(new Map<Element, string>());
+  const controllerByKeyRef = useRef(
+    new Map<string, TimelineWindowItemController>(),
+  );
+  const intersectionObserverRef = useRef<IntersectionObserver | null>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  // Last committed content height of each realized wrapper. Late growth
+  // (lazy images, async rendering) diffs against this baseline so it can be
+  // compensated the same way as the mount-time delta.
+  const realizedHeightByKeyRef = useRef(new Map<string, number>());
+  // Interaction-pinned keys in recency order, capped so pins cannot
+  // accumulate without bound over a long session.
+  const pinnedKeysRef = useRef<string[]>([]);
+  // The observers outlive row streaming, so their callbacks read the current
+  // key order through this ref instead of re-creating per rows change.
+  const itemKeysRef = useRef(itemKeys);
+  useLayoutEffect(() => {
+    itemKeysRef.current = itemKeys;
+  }, [itemKeys]);
+  const alwaysRealizedKeys = useMemo(() => {
+    if (!shouldWindow) {
+      return EMPTY_ROW_ID_SET;
+    }
+    const keys = new Set<string>();
+    if (searchTarget !== null && searchTargetsTimeline) {
+      const searchIndex = items.findIndex(
+        (item) =>
+          item.kind === "row" &&
+          item.row.sourceSeqStart <= searchTarget.seq &&
+          searchTarget.seq <= item.row.sourceSeqEnd,
+      );
+      const searchItem = items[searchIndex];
+      if (searchItem !== undefined) {
+        keys.add(timelineListItemKey(searchItem));
+      }
+    }
+    if (unreadDividerAutoScroll) {
+      const dividerIndex = items.findIndex(
+        (item) => item.kind === "unread-divider",
+      );
+      const divider = items[dividerIndex];
+      if (divider !== undefined) {
+        keys.add(timelineListItemKey(divider));
+      }
+    }
+    return keys;
+  }, [
+    items,
+    searchTarget,
+    searchTargetsTimeline,
+    shouldWindow,
+    unreadDividerAutoScroll,
+  ]);
+
+  const registerWrapper = useCallback(
+    (key: string, node: HTMLDivElement | null) => {
+      const previous = wrapperByKeyRef.current.get(key);
+      if (previous !== undefined && previous !== node) {
+        keyByWrapperRef.current.delete(previous);
+        intersectionObserverRef.current?.unobserve(previous);
+        resizeObserverRef.current?.unobserve(previous);
+      }
+      if (node === null) {
+        wrapperByKeyRef.current.delete(key);
+        realizedHeightByKeyRef.current.delete(key);
+        return;
+      }
+      wrapperByKeyRef.current.set(key, node);
+      keyByWrapperRef.current.set(node, key);
+      intersectionObserverRef.current?.observe(node);
+      resizeObserverRef.current?.observe(node);
+    },
+    [],
+  );
+  const registerController = useCallback(
+    (key: string, controller: TimelineWindowItemController | null) => {
+      if (controller === null) {
+        controllerByKeyRef.current.delete(key);
+        return;
+      }
+      controllerByKeyRef.current.set(key, controller);
+    },
+    [],
+  );
+  const registerInteractionPin = useCallback((key: string) => {
+    const pinned = pinnedKeysRef.current;
+    const existing = pinned.indexOf(key);
+    if (existing >= 0) {
+      pinned.splice(existing, 1);
+    }
+    pinned.push(key);
+    while (pinned.length > TIMELINE_WINDOW_MAX_INTERACTION_PINS) {
+      const evicted = pinned.shift();
+      if (evicted !== undefined) {
+        controllerByKeyRef.current.get(evicted)?.unpin();
+      }
+    }
+  }, []);
+
+  const getScrollElement = bottomAnchor?.getScrollElement;
+  useEffect(() => {
+    if (!shouldWindow || typeof IntersectionObserver === "undefined") {
+      return;
+    }
+    const scrollElement = getScrollElement?.() ?? null;
+    if (scrollElement === null) {
+      return;
+    }
+    const realizedHeightByKey = realizedHeightByKeyRef.current;
+
+    const applyWithScrollCompensation = (apply: () => void) => {
+      const maxScrollTop = Math.max(
+        0,
+        scrollElement.scrollHeight - scrollElement.clientHeight,
+      );
+      const wasAtBottom = maxScrollTop - scrollElement.scrollTop <= 2;
+      const anchor = wasAtBottom
+        ? null
+        : captureTimelineVisibleAnchor({
+            scrollElement,
+            orderedKeys: itemKeysRef.current,
+            wrapperByKey: wrapperByKeyRef.current,
+          });
+      flushSync(apply);
+      restoreTimelineVisibleAnchor({ anchor, scrollElement, wasAtBottom });
+    };
+
+    // Distributes one above-viewport height delta into placeholder donors
+    // that sit earlier in the list (and therefore also fully above the
+    // viewport). Positive deltas shrink donors topmost-first so placeholders
+    // nearest the viewport keep accurate heights; negative deltas hand the
+    // slack to the topmost donor. All-or-nothing: donors change only when
+    // the whole delta is covered, so the swap is exactly net zero. Must run
+    // inside flushSync so donor commits paint atomically with the change
+    // they balance.
+    const tryCompensateAboveViewportDelta = (
+      candidateIndex: number,
+      delta: number,
+    ): boolean => {
+      const keys = itemKeysRef.current;
+      if (delta < 0) {
+        for (let index = 0; index < candidateIndex; index += 1) {
+          const key = keys[index];
+          if (key === undefined) {
+            continue;
+          }
+          const controller = controllerByKeyRef.current.get(key);
+          if ((controller?.peekPlaceholderHeight() ?? null) !== null) {
+            controller?.adjustPlaceholderHeight(-delta);
+            return true;
+          }
+        }
+        return false;
+      }
+      let remaining = delta;
+      const takes: Array<[TimelineWindowItemController, number]> = [];
+      for (
+        let index = 0;
+        index < candidateIndex && remaining > 0.5;
+        index += 1
+      ) {
+        const key = keys[index];
+        if (key === undefined) {
+          continue;
+        }
+        const controller = controllerByKeyRef.current.get(key);
+        if (controller === undefined) {
+          continue;
+        }
+        const available = controller.peekPlaceholderHeight();
+        if (available === null || available <= 0) {
+          continue;
+        }
+        const take = Math.min(available, remaining);
+        takes.push([controller, take]);
+        remaining -= take;
+      }
+      if (remaining > 0.5) {
+        return false;
+      }
+      for (const [controller, take] of takes) {
+        controller.adjustPlaceholderHeight(-take);
+      }
+      return true;
+    };
+
+    // Realizations that found no donor capacity while scrolling. They keep
+    // their unchanged placeholders (nothing on screen moves) and mount at
+    // the next idle pass, where a compensating scrollTop write is free.
+    // During an active scroll the ONLY geometry this component changes is
+    // the exact net-zero donor swap — no scrollTop writes, no tolerated
+    // drift. Anything that cannot satisfy that invariant waits for idle.
+    const pendingRealizeKeys = new Set<string>();
+
+    // Running average of first-measured item heights. Never-realized
+    // placeholders start from a static estimate that real content usually
+    // exceeds, so donor capacity would otherwise drain monotonically during
+    // upward scrolling. Re-budgeting those estimates to the measured average
+    // at idle keeps the donor pool solvent, which keeps insolvency reverts
+    // (and their brief near-top blanks) rare.
+    const measuredSampleKeys = new Set<string>();
+    let measuredSampleSum = 0;
+    let lastRebudgetAverage: number | null = null;
+    const computeRebudgetAdjustments = (): Array<
+      [TimelineWindowItemController, number]
+    > => {
+      if (measuredSampleKeys.size < TIMELINE_WINDOW_REBUDGET_MIN_SAMPLES) {
+        return [];
+      }
+      const average = Math.min(
+        TIMELINE_WINDOW_REBUDGET_MAX_ESTIMATE_PX,
+        measuredSampleSum / measuredSampleKeys.size,
+      );
+      if (
+        lastRebudgetAverage !== null &&
+        Math.abs(average - lastRebudgetAverage) <
+          TIMELINE_WINDOW_REBUDGET_DRIFT_PX
+      ) {
+        return [];
+      }
+      lastRebudgetAverage = average;
+      const adjustments: Array<[TimelineWindowItemController, number]> = [];
+      for (const key of itemKeysRef.current) {
+        const controller = controllerByKeyRef.current.get(key);
+        if (controller === undefined || controller.hasEverRealized()) {
+          continue;
+        }
+        const current = controller.peekPlaceholderHeight();
+        if (current === null) {
+          continue;
+        }
+        const delta = average - current;
+        if (Math.abs(delta) < 1) {
+          continue;
+        }
+        adjustments.push([controller, delta]);
+      }
+      return adjustments;
+    };
+
+    // One idle pass covers both deferred works: mount the insolvent
+    // realizations and re-seed estimate placeholders, in a single
+    // anchor-compensated commit.
+    const runIdlePass = () => {
+      const pending = [...pendingRealizeKeys];
+      pendingRealizeKeys.clear();
+      const adjustments = computeRebudgetAdjustments();
+      if (pending.length === 0 && adjustments.length === 0) {
+        return;
+      }
+      applyWithScrollCompensation(() => {
+        for (const key of pending) {
+          controllerByKeyRef.current.get(key)?.realize();
+        }
+        for (const [controller, delta] of adjustments) {
+          controller.adjustPlaceholderHeight(delta);
+        }
+      });
+    };
+    let idlePassTimeout: number | null = null;
+    const scheduleIdlePass = () => {
+      if (idlePassTimeout !== null) {
+        window.clearTimeout(idlePassTimeout);
+      }
+      idlePassTimeout = window.setTimeout(() => {
+        idlePassTimeout = null;
+        if (scrollElement.dataset.scrollbarScrolling === "true") {
+          scheduleIdlePass();
+          return;
+        }
+        runIdlePass();
+      }, TIMELINE_WINDOW_REBUDGET_IDLE_DELAY_MS);
+    };
+    const recordMeasuredSample = (key: string, height: number) => {
+      if (height <= 0 || measuredSampleKeys.has(key)) {
+        return;
+      }
+      measuredSampleKeys.add(key);
+      measuredSampleSum += height;
+      scheduleIdlePass();
+    };
+
+    // Realize items whose top sits above the viewport while a scroll is
+    // active. Mount their content in one synchronous commit, measure each
+    // realized height, then balance every height delta against placeholder
+    // donors in a second commit in the same task (so nothing paints in
+    // between). The net height change above the viewport stays zero, which
+    // keeps visible content still without a momentum-killing scrollTop
+    // write. Donor placeholders self-correct: they re-measure whenever they
+    // realize or derealize later.
+    const realizeAboveViewportDuringScroll = (keys: readonly string[]) => {
+      const itemKeysNow = itemKeysRef.current;
+      const candidates = keys.flatMap((key) => {
+        const controller = controllerByKeyRef.current.get(key);
+        const wrapper = wrapperByKeyRef.current.get(key);
+        const index = itemKeysNow.indexOf(key);
+        const placeholderHeight = controller?.peekPlaceholderHeight() ?? null;
+        if (
+          controller === undefined ||
+          wrapper === undefined ||
+          index < 0 ||
+          placeholderHeight === null
+        ) {
+          return [];
+        }
+        return [{ controller, index, key, placeholderHeight, wrapper }];
+      });
+      if (candidates.length === 0) {
+        return;
+      }
+
+      flushSync(() => {
+        for (const candidate of candidates) {
+          candidate.controller.realize();
+        }
+      });
+
+      flushSync(() => {
+        for (const candidate of candidates) {
+          const measured = candidate.wrapper.getBoundingClientRect().height;
+          recordMeasuredSample(candidate.key, measured);
+          const delta = measured - candidate.placeholderHeight;
+          if (
+            delta !== 0 &&
+            !tryCompensateAboveViewportDelta(candidate.index, delta)
+          ) {
+            // No donor capacity (near the top of the timeline): revert to
+            // the unchanged placeholder — net zero, nothing painted in
+            // between — and mount at the idle pass instead.
+            candidate.controller.derealize();
+            pendingRealizeKeys.add(candidate.key);
+            scheduleIdlePass();
+            continue;
+          }
+          realizedHeightByKey.set(candidate.key, measured);
+        }
+      });
+    };
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        // A programmatic scrollTop write stops WebKit's native momentum
+        // scrolling, and WebKit — the only engine this compact-viewport list
+        // runs on for mobile — has no scroll anchoring to absorb layout
+        // shifts. While a scroll is active (the scroll owner keeps this
+        // marker present through the inertial tail), apply derealizations
+        // and at-or-below-viewport realizations directly: derealizations
+        // swap in their just-measured height, and an item whose top edge is
+        // at or below the viewport top only pushes layout below that edge
+        // when it grows. Items whose top is above the viewport realize with
+        // donor compensation instead.
+        if (scrollElement.dataset.scrollbarScrolling === "true") {
+          let viewportTop: number | null = null;
+          const growUpKeys: string[] = [];
+          for (const entry of entries) {
+            const key = keyByWrapperRef.current.get(entry.target);
+            if (key === undefined) {
+              continue;
+            }
+            const controller = controllerByKeyRef.current.get(key);
+            if (controller === undefined) {
+              continue;
+            }
+            if (!entry.isIntersecting) {
+              realizedHeightByKey.delete(key);
+              pendingRealizeKeys.delete(key);
+              controller.handleIntersection(entry);
+              continue;
+            }
+            const alreadyRealized =
+              wrapperByKeyRef.current.get(key)?.dataset
+                .timelineRowRealized === "true";
+            if (alreadyRealized) {
+              controller.handleIntersection(entry);
+              continue;
+            }
+            // rootBounds already includes the rootMargin expansion; strip it
+            // to recover the true viewport edge without forcing a layout.
+            const rootTop = entry.rootBounds?.top;
+            viewportTop ??=
+              rootTop !== undefined
+                ? rootTop + TIMELINE_WINDOW_MARGIN_PX
+                : scrollElement.getBoundingClientRect().top;
+            if (entry.boundingClientRect.top >= viewportTop) {
+              controller.handleIntersection(entry);
+              continue;
+            }
+            growUpKeys.push(key);
+          }
+          if (growUpKeys.length > 0) {
+            realizeAboveViewportDuringScroll(growUpKeys);
+          }
+          return;
+        }
+
+        applyWithScrollCompensation(() => {
+          for (const entry of entries) {
+            const key = keyByWrapperRef.current.get(entry.target);
+            if (key === undefined) {
+              continue;
+            }
+            if (entry.isIntersecting) {
+              pendingRealizeKeys.delete(key);
+            } else {
+              realizedHeightByKey.delete(key);
+              pendingRealizeKeys.delete(key);
+            }
+            controllerByKeyRef.current.get(key)?.handleIntersection(entry);
+          }
+        });
+      },
+      {
+        root: scrollElement,
+        rootMargin: `${TIMELINE_WINDOW_MARGIN_PX}px 0px`,
+      },
+    );
+    intersectionObserverRef.current = observer;
+
+    // Late content growth in a realized row above the viewport (a lazy image
+    // decoding, async rendering settling) shifts visible content, because
+    // WebKit has no scroll anchoring. Compensate with a direct scrollTop
+    // nudge — but only while the scroll is idle, where the write is free.
+    // During an active scroll only the baseline updates: mutating geometry
+    // mid-gesture is exactly what reads as snapping. Growth in or below the
+    // viewport stays uncompensated: a visible image expanding in place is
+    // expected content behavior.
+    let contentGrowthObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      contentGrowthObserver = new ResizeObserver((entries) => {
+        let viewportTop: number | null = null;
+        let idleAdjustment = 0;
+        const scrolling =
+          scrollElement.dataset.scrollbarScrolling === "true";
+        for (const entry of entries) {
+          const key = keyByWrapperRef.current.get(entry.target);
+          if (key === undefined) {
+            continue;
+          }
+          const wrapper = wrapperByKeyRef.current.get(key);
+          if (wrapper === undefined) {
+            continue;
+          }
+          if (wrapper.dataset.timelineRowRealized !== "true") {
+            // Placeholder height changes are this component's own writes
+            // (donor adjustments, derealization measurements) — already
+            // balanced, never compensated again.
+            realizedHeightByKey.delete(key);
+            continue;
+          }
+          const height =
+            entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
+          const previous = realizedHeightByKey.get(key);
+          realizedHeightByKey.set(key, height);
+          recordMeasuredSample(key, height);
+          if (previous === undefined || scrolling) {
+            // First observation after an already-balanced realization, or a
+            // mid-scroll change that must not mutate geometry.
+            continue;
+          }
+          const delta = height - previous;
+          if (Math.abs(delta) < 0.5) {
+            continue;
+          }
+          viewportTop ??= scrollElement.getBoundingClientRect().top;
+          if (wrapper.getBoundingClientRect().bottom > viewportTop) {
+            continue;
+          }
+          idleAdjustment += delta;
+        }
+        if (idleAdjustment !== 0) {
+          scrollElement.scrollTop = Math.max(
+            0,
+            scrollElement.scrollTop + idleAdjustment,
+          );
+        }
+      });
+    }
+    resizeObserverRef.current = contentGrowthObserver;
+
+    for (const wrapper of wrapperByKeyRef.current.values()) {
+      observer.observe(wrapper);
+      contentGrowthObserver?.observe(wrapper);
+    }
+    // Scroll events push the pending idle pass out to the next quiet moment.
+    scrollElement.addEventListener("scroll", scheduleIdlePass, {
+      passive: true,
+    });
+
+    return () => {
+      intersectionObserverRef.current = null;
+      resizeObserverRef.current = null;
+      observer.disconnect();
+      contentGrowthObserver?.disconnect();
+      scrollElement.removeEventListener("scroll", scheduleIdlePass);
+      if (idlePassTimeout !== null) {
+        window.clearTimeout(idlePassTimeout);
+      }
+      pendingRealizeKeys.clear();
+      realizedHeightByKey.clear();
+    };
+  }, [getScrollElement, shouldWindow]);
+
+  const renderedRowsKey = shouldWindow
+    ? [...alwaysRealizedKeys].sort().join("\u0000")
+    : "all";
+
+  useScrollToSearchedMessage(rows, threadId, {
+    hasOlderRows: hasOlderTimelineRows,
+    isLoadingOlderRows: isLoadingOlderTimelineRows,
+    onLoadOlderRows,
+    renderedRowsKey,
+  });
+
+  const renderItem = (item: TimelineRowsListItem) => {
+    if (item.kind === "unread-divider") {
+      return <TimelineUnreadDivider autoScroll={unreadDividerAutoScroll} />;
+    }
+    return (
+      <MemoizedTimelineRowView
+        activeLatestBundleId={activeLatestBundleId}
+        row={item.row}
+        scopeActive={scopeActive}
+        showAssistantMessageActions={showAssistantMessageActions}
+        spacing={spacing}
+        compactActivityIntents={compactActivityIntents}
+      />
+    );
+  };
+
+  if (shouldWindow) {
+    return (
+      <TimelineSearchExpansionContext.Provider
+        value={stableSearchExpandedRowIds}
+      >
+        <div
+          className={cn(
+            "flex min-w-0 flex-col [&_button:not(:disabled)]:cursor-pointer",
+            timelineRowsListGapClassName(spacing),
+            className,
+          )}
+          data-timeline-row-list={spacing}
+          data-timeline-windowed="true"
+        >
+          {items.map((item) => {
+            const itemKey = timelineListItemKey(item);
+            return (
+              <TimelineWindowedListItem
+                key={itemKey}
+                alwaysRealized={alwaysRealizedKeys.has(itemKey)}
+                estimatedHeight={estimateTimelineListItemHeight(item)}
+                initiallyRealized={initiallyRealizedKeys.has(itemKey)}
+                itemKey={itemKey}
+                registerController={registerController}
+                registerInteractionPin={registerInteractionPin}
+                registerWrapper={registerWrapper}
+                rowId={item.kind === "row" ? item.row.id : undefined}
+              >
+                {renderItem(item)}
+              </TimelineWindowedListItem>
+            );
+          })}
+        </div>
+      </TimelineSearchExpansionContext.Provider>
+    );
+  }
+
+  const list = (
     <TimelineSearchExpansionContext.Provider value={stableSearchExpandedRowIds}>
       <div
         className={cn(
@@ -1914,20 +2839,22 @@ function TimelineRowsList({
           }
 
           return (
-            <div key={item.row.id} data-timeline-row-id={item.row.id}>
-              <MemoizedTimelineRowView
-                activeLatestBundleId={activeLatestBundleId}
-                row={item.row}
-                scopeActive={scopeActive}
-                showAssistantMessageActions={showAssistantMessageActions}
-                spacing={spacing}
-                compactActivityIntents={compactActivityIntents}
-              />
+            <div
+              key={item.row.id}
+              data-timeline-row-id={item.row.id}
+              data-timeline-row-realized="true"
+            >
+              {renderItem(item)}
             </div>
           );
         })}
       </div>
     </TimelineSearchExpansionContext.Provider>
+  );
+  return spacing === "top-level" ? (
+    <AutoHeightContainer>{list}</AutoHeightContainer>
+  ) : (
+    list
   );
 }
 
@@ -1945,7 +2872,6 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
     () => getViewRows(props.timelineRows),
     [getViewRows, props.timelineRows],
   );
-  const heightSnapRevision = timelineHeightSnapRevision(props.timelineRows);
   const latestActionableAssistantMessageId = useMemo(
     () => findLastActionableAssistantMessageId(rows),
     [rows],
@@ -1970,8 +2896,22 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
   const liveAutoExpandedRowIds = useStableReadonlySet(
     computedAutoExpansionRowIds.liveFrontierRowIds,
   );
+  // Terminal auto-expansion is a one-shot latch per row, and the latch lives
+  // in row-local state that windowed eviction unmounts. Accumulate every id
+  // that has ever latched so an evicted frontier-error row re-expands when it
+  // remounts. A row the user manually collapses stays collapsed: collapsing
+  // is an interaction, which pins the row against eviction, so its manual
+  // override survives.
+  const accumulatedTerminalRowIdsRef = useRef(new Set<string>());
+  const accumulatedTerminalRowIds = useMemo(() => {
+    const accumulated = accumulatedTerminalRowIdsRef.current;
+    for (const id of computedAutoExpansionRowIds.terminalFrontierRowIds) {
+      accumulated.add(id);
+    }
+    return new Set(accumulated);
+  }, [computedAutoExpansionRowIds.terminalFrontierRowIds]);
   const terminalAutoExpandedRowIds = useStableReadonlySet(
-    computedAutoExpansionRowIds.terminalFrontierRowIds,
+    accumulatedTerminalRowIds,
   );
   const initialAutoExpandedRowIds = useStableReadonlySet(
     props.initialExpanded ?? EMPTY_ROW_ID_SET,
@@ -2180,26 +3120,20 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
               value={latestActionableUserMessageId}
             >
               <TimelineTurnStateContext.Provider value={turnStateContextValue}>
-                <AutoHeightContainer snapRevision={heightSnapRevision}>
-                  <TimelineRowsList
-                    hasOlderTimelineRows={props.hasOlderTimelineRows}
-                    isLoadingOlderTimelineRows={
-                      props.isLoadingOlderTimelineRows
-                    }
-                    onLoadOlderRows={props.onLoadOlderRows}
-                    rows={rows}
-                    scopeActive={scopeActive}
-                    showAssistantMessageActions={true}
-                    compactActivityIntents={false}
-                    spacing="top-level"
-                    unreadDividerAutoScroll={
-                      props.unreadDividerAutoScroll ?? true
-                    }
-                    unreadDividerPlacement={
-                      props.unreadDividerPlacement ?? null
-                    }
-                  />
-                </AutoHeightContainer>
+                <TimelineRowsList
+                  hasOlderTimelineRows={props.hasOlderTimelineRows}
+                  isLoadingOlderTimelineRows={props.isLoadingOlderTimelineRows}
+                  onLoadOlderRows={props.onLoadOlderRows}
+                  rows={rows}
+                  scopeActive={scopeActive}
+                  showAssistantMessageActions={true}
+                  compactActivityIntents={false}
+                  spacing="top-level"
+                  unreadDividerAutoScroll={
+                    props.unreadDividerAutoScroll ?? true
+                  }
+                  unreadDividerPlacement={props.unreadDividerPlacement ?? null}
+                />
                 {hasSelectionActions ? (
                   <TimelineSelectionMenu
                     selection={activeSelection?.selection ?? null}

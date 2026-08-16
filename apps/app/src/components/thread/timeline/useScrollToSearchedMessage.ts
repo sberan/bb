@@ -21,6 +21,8 @@ interface SearchMessagePaginationOptions {
   hasOlderRows?: boolean;
   isLoadingOlderRows?: boolean;
   onLoadOlderRows?: () => Promise<void> | void;
+  /** Changes when a virtual list mounts a different row range. */
+  renderedRowsKey?: string;
 }
 
 interface SeqRange {
@@ -195,6 +197,7 @@ export function useScrollToSearchedMessage(
     hasOlderRows = false,
     isLoadingOlderRows = false,
     onLoadOlderRows,
+    renderedRowsKey,
   }: SearchMessagePaginationOptions = {},
 ): void {
   const location = useLocation();
@@ -247,7 +250,11 @@ export function useScrollToSearchedMessage(
       return;
     }
     const selector = `[data-timeline-row-id="${escapeTimelineRowId(targetLeafRow.id)}"]`;
-    if (document.querySelector(selector) === null) {
+    const renderedTarget = document.querySelector<HTMLElement>(selector);
+    if (
+      renderedTarget === null ||
+      renderedTarget.dataset.timelineRowRealized === "false"
+    ) {
       return;
     }
     handledKeyRef.current = location.key;
@@ -291,6 +298,7 @@ export function useScrollToSearchedMessage(
     isLoadingOlderRows,
     location.key,
     onLoadOlderRows,
+    renderedRowsKey,
     rows,
     targetSeq,
     targetThreadId,
