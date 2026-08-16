@@ -83,10 +83,18 @@ function BackgroundActivitySummary({
 }) {
   const display = backgroundActivityDisplay(row);
   return (
-    <span className="flex min-w-0 flex-1 items-center gap-1 text-left">
+    <span className="flex min-w-0 flex-1 items-center gap-1 text-left max-md:pointer-coarse:items-start">
       {/* Verb + description truncate as one unit so the trailing controls
-          ("+N more", chevron, duration) never get pushed off a narrow banner. */}
-      <span className="min-w-0 truncate" title={row.description}>
+          ("+N more", chevron, duration) never get pushed off a narrow banner.
+
+          On touch that single line is a dead end: the full text is reachable
+          only through the title attribute, and there is no hover. Wrap to two
+          lines there. The trailing controls are shrink-0 siblings, so the row
+          grows downward instead of pushing them off the edge. */}
+      <span
+        className="min-w-0 truncate max-md:pointer-coarse:whitespace-normal max-md:pointer-coarse:line-clamp-2 max-md:pointer-coarse:break-words"
+        title={row.description}
+      >
         <span
           className={
             active ? activityMetaClass("active") : "text-muted-foreground"
@@ -227,15 +235,20 @@ export function ThreadBackgroundCommandsCard({
                     key={row.id}
                     // px-3 matches the full-width header row's padding so the
                     // icon lines up under the header icon.
-                    className="flex min-w-0 items-center gap-1.5 px-3 py-0.5 text-xs"
+                    className="flex min-w-0 items-center gap-1.5 px-3 py-0.5 text-xs max-md:pointer-coarse:items-start"
                   >
                     <Icon
                       name={display.icon}
-                      className="size-3.5 shrink-0 text-muted-foreground/60"
+                      className="size-3.5 shrink-0 text-muted-foreground/60 max-md:pointer-coarse:mt-0.5"
                       aria-hidden="true"
                     />
+                    {/* The title attribute is the only way to read a truncated
+                        command, and hover does not exist on touch — so the
+                        expanded list is a dead end on a phone. Wrap to a couple
+                        of lines there instead; the collapsed summary above
+                        still truncates to one line. */}
                     <span
-                      className="min-w-0 flex-1 truncate text-muted-foreground"
+                      className="min-w-0 flex-1 truncate text-muted-foreground max-md:pointer-coarse:whitespace-normal max-md:pointer-coarse:line-clamp-2 max-md:pointer-coarse:break-words"
                       title={row.description}
                     >
                       {row.description}
