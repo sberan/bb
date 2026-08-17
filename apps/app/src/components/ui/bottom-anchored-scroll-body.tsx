@@ -80,6 +80,10 @@ interface ElementVisibilityArgs {
 }
 
 const BOTTOM_ANCHOR_THRESHOLD_PX = 4;
+/** Scroll travel in one direction before the composer hides or reappears. */
+const FOOTER_VISIBILITY_TRAVEL_PX = 48;
+/** Within this much of the end, the composer is always shown. */
+const FOOTER_REVEAL_BOTTOM_PX = 96;
 const USER_SCROLL_INTENT_MS = 1_000;
 const SCROLLBAR_IDLE_DELAY_MS = 600;
 // ResizeObserver can fire before related flex/sidebar/prompt layout settles.
@@ -300,6 +304,18 @@ export function BottomAnchoredScrollBody({
   }>({ lastWriteAt: 0, trailingTimeout: null });
   const userDetachedFromBottomRef = useRef(false);
   const [isAtBottom, setIsAtBottom] = useState(true);
+
+  // The footer sits in the scroller's grid cell rather than inside the scrolled
+  // content, so WebKit's rubber-band cannot carry it away from the bottom edge.
+  // Reserving its height as content padding keeps the geometry the sticky
+  // footer used to produce: the last row still comes to rest above the footer,
+  // and scrollHeight still counts that space, so the bottom-anchor math is
+  // unchanged.
+  const footerRef = useRef<HTMLDivElement>(null);
+  const [footerHeight, setFooterHeight] = useState(0);
+  const [isFooterHidden, setIsFooterHidden] = useState(false);
+  const lastScrollTopRef = useRef(0);
+  const hideGestureTravelRef = useRef(0);
 
   const getScrollElement = useCallback(() => scrollAreaRef.current, []);
 
@@ -633,10 +649,47 @@ export function BottomAnchoredScrollBody({
     pendingScrollRestoreRef.current = null;
   }, [cancelQueuedRestore, hasRecentUserScrollIntent]);
 
+  // Swiping down — pulling older content into view — hides the composer so the
+  // transcript gets the space. Swiping back toward the newest message brings it
+  // back, as does arriving at the bottom. Travel accumulates so a few pixels of
+  // wobble mid-gesture cannot flap it, and a focused composer is never hidden
+  // out from under someone who is typing in it.
+  const syncFooterVisibilityFromScroll = useCallback(() => {
+    const scrollArea = scrollAreaRef.current;
+    if (!scrollArea) return;
+    const scrollTop = scrollArea.scrollTop;
+    const delta = scrollTop - lastScrollTopRef.current;
+    lastScrollTopRef.current = scrollTop;
+    if (delta === 0) return;
+
+    const travel = hideGestureTravelRef.current;
+    hideGestureTravelRef.current =
+      Math.sign(travel) === Math.sign(delta) ? travel + delta : delta;
+
+    if (getMaxScrollOffset(scrollArea) - scrollTop <= FOOTER_REVEAL_BOTTOM_PX) {
+      hideGestureTravelRef.current = 0;
+      setIsFooterHidden(false);
+      return;
+    }
+    if (hideGestureTravelRef.current >= FOOTER_VISIBILITY_TRAVEL_PX) {
+      setIsFooterHidden(false);
+      return;
+    }
+    if (hideGestureTravelRef.current > -FOOTER_VISIBILITY_TRAVEL_PX) return;
+    const footerElement = footerRef.current;
+    if (footerElement?.contains(document.activeElement)) return;
+    setIsFooterHidden(true);
+  }, []);
+
   const handleScroll = useCallback(() => {
     syncBottomStateFromScroll();
+    syncFooterVisibilityFromScroll();
     captureScrollAnchorThrottled();
-  }, [syncBottomStateFromScroll, captureScrollAnchorThrottled]);
+  }, [
+    syncBottomStateFromScroll,
+    syncFooterVisibilityFromScroll,
+    captureScrollAnchorThrottled,
+  ]);
 
   // Drive a pending row restore as content settles. ResizeObserver fires as
   // rows hydrate / heights change after mount, so each pass re-applies the
@@ -671,6 +724,31 @@ export function BottomAnchoredScrollBody({
     }
     return true;
   }, [applyScrollRestore, queueBottomRestore]);
+
+  // One-directional on purpose: the footer's height feeds the content's bottom
+  // padding, and that padding can never feed back into the footer's height. The
+  // measurement is of the untransformed box, so hiding it (a transform) does
+  // not churn this.
+  useLayoutEffect(() => {
+    const footerElement = footerRef.current;
+    if (!footerElement) {
+      setFooterHeight(0);
+      return;
+    }
+    const measure = () => {
+      const nextHeight = Math.round(
+        footerElement.getBoundingClientRect().height,
+      );
+      setFooterHeight((currentHeight) =>
+        currentHeight === nextHeight ? currentHeight : nextHeight,
+      );
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const resizeObserver = new ResizeObserver(measure);
+    resizeObserver.observe(footerElement);
+    return () => resizeObserver.disconnect();
+  }, [footer]);
 
   const handleScrollAreaResize = useCallback(() => {
     // While a restore is pending, the ResizeObserver is the settle signal; the
@@ -829,13 +907,6 @@ export function BottomAnchoredScrollBody({
           ref={scrollAreaRef}
           className={cn(
             "thread-scrollbar @container/page col-start-1 row-start-1 min-h-0 overflow-x-hidden overflow-y-auto",
-            // The composer is a sticky child of this scroller, and WebKit's
-            // rubber-band translates the whole scrolled content — sticky
-            // children ride along with it. So overscrolling the transcript
-            // dragged the input away from the bottom edge under your thumb.
-            // Suppressing the bounce on touch pins it. Desktop keeps the
-            // affordance, where the composer is not under a moving finger.
-            "max-md:pointer-coarse:overscroll-y-none",
             scrollAreaClassName,
           )}
         >
@@ -845,6 +916,10 @@ export function BottomAnchoredScrollBody({
               "flex min-h-full min-w-0 flex-col",
               isAtBottom && "scroll-bottom-anchor-content",
             )}
+            // Space the footer would have occupied as a sticky child. Keeping
+            // it in the scrolled content's height is what preserves the
+            // bottom-anchor math now that the footer itself lives outside.
+            style={{ paddingBottom: footerHeight }}
           >
             <div
               className={cn(
@@ -857,9 +932,6 @@ export function BottomAnchoredScrollBody({
               {children}
               <div className="scroll-bottom-anchor" aria-hidden />
             </div>
-            {footer ? (
-              <div className="sticky bottom-0 z-20 shrink-0">{footer}</div>
-            ) : null}
           </div>
         </div>
         {scrollOverlay ? (
@@ -868,6 +940,25 @@ export function BottomAnchoredScrollBody({
             className="pointer-events-none z-30 col-start-1 row-start-1 flex min-h-0 min-w-0 items-center justify-end px-3 py-3"
           >
             <div className="pointer-events-auto">{scrollOverlay}</div>
+          </div>
+        ) : null}
+        {footer ? (
+          <div
+            ref={footerRef}
+            data-scroll-body-footer=""
+            data-hidden={isFooterHidden ? "" : undefined}
+            // Same grid cell as the scroller, pinned to its end: the transcript
+            // keeps its full height and bounces underneath, while this stays
+            // put. Hiding is transform + opacity only, so revealing the rows
+            // behind it costs no layout.
+            className={cn(
+              "z-20 col-start-1 row-start-1 self-end transition-[transform,opacity] duration-200 ease-out motion-reduce:transition-none",
+              isFooterHidden
+                ? "pointer-events-none translate-y-full opacity-0"
+                : "translate-y-0 opacity-100",
+            )}
+          >
+            {footer}
           </div>
         ) : null}
       </div>
