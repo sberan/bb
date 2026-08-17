@@ -121,6 +121,12 @@ import { MentionMenu, type TypeaheadSuggestion } from "./mentions/MentionMenu";
 import { parsePromptMentionClipboardElement } from "./mentions/prompt-mention-clipboard";
 
 const PROMPTBOX_MIN_HEIGHT = 68;
+/**
+ * How recently the editor must have held focus for a draft restore to take it
+ * back on touch. Long enough to cover the blur a tap causes and the re-render
+ * that follows it, short enough that it cannot be mistaken for a fresh surface.
+ */
+const RECENT_EDITOR_FOCUS_MS = 600;
 const PROMPTBOX_SELECTION_REVEAL_MARGIN = 12;
 // 32px is below the 44px minimum touch target, and this is the slot shared by
 // submit, stop and voice input — the most-tapped control in the app. Coarse
@@ -1968,22 +1974,60 @@ export function PromptBoxInternal({
     value,
   ]);
 
+  // Whether the editor holds focus, or held it a moment ago. Restoring focus
+  // the user's own tap just took away is a different act from summoning the
+  // keyboard onto a surface they never touched, and only the timing tells them
+  // apart — by the time a draft-restore runs, iOS has already moved focus to
+  // the document.
+  const editorFocusLostAtRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!editor) return;
+    const editorDom = editor.view.dom;
+    const handleFocus = () => {
+      editorFocusLostAtRef.current = null;
+    };
+    const handleBlur = () => {
+      editorFocusLostAtRef.current = Date.now();
+    };
+    editorDom.addEventListener("focus", handleFocus);
+    editorDom.addEventListener("blur", handleBlur);
+    return () => {
+      editorDom.removeEventListener("focus", handleFocus);
+      editorDom.removeEventListener("blur", handleBlur);
+    };
+  }, [editor]);
+
   // An explicit draft-restore action (e.g. editing a queued message) bumps
   // `focusEndKey` so the caret lands at the END of the restored text. It is a
   // layout effect defined AFTER the layout content-sync effect above, so the
   // editor has already applied `setContent` for the new draft in the same
-  // commit. Mobile web deliberately does not take focus here: an action that
-  // opens or updates a composer must not summon the soft keyboard over the
-  // destination surface.
+  // commit.
+  //
+  // Touch takes focus only to give back what a tap just removed. Editing a
+  // queued message runs inside the tap on its Edit button, and iOS does not
+  // focus buttons — so that tap blurs the editor and drops the keyboard, and
+  // refusing to focus left an open edit session with nothing to type into.
+  // React flushes discrete events synchronously, so this still runs inside the
+  // gesture and the keyboard comes back. Focusing a composer that was not
+  // recently focused stays forbidden: opening or updating one in the background
+  // must not summon the keyboard over the destination surface.
   const lastFocusEndKeyRef = useRef(focusEndKey);
   useLayoutEffect(() => {
     if (focusEndKey === undefined) return;
     if (focusEndKey === lastFocusEndKeyRef.current) return;
-    if (isPointerCoarse) {
-      lastFocusEndKeyRef.current = focusEndKey;
-      return;
-    }
     if (!editor) return;
+    if (isPointerCoarse) {
+      const editorDom = editor.view.dom;
+      const focusLostAt = editorFocusLostAtRef.current;
+      const isRestoringOwnFocus =
+        editorDom.contains(document.activeElement) ||
+        (focusLostAt !== null &&
+          Date.now() - focusLostAt <= RECENT_EDITOR_FOCUS_MS);
+      if (!isRestoringOwnFocus) {
+        lastFocusEndKeyRef.current = focusEndKey;
+        return;
+      }
+    }
     lastFocusEndKeyRef.current = focusEndKey;
     focusEditorAtEnd(editor);
     scheduleRevealEditorSelection();

@@ -1152,6 +1152,60 @@ describe("PromptBoxInternal controlled value sync", () => {
   });
 });
 
+describe("PromptBoxInternal touch draft restore", () => {
+  it("restores focus the tap took away when a draft is loaded on touch", () => {
+    // Editing a queued message runs inside the tap on the Edit button. iOS does
+    // not focus a button, so that tap blurs the editor and dismisses the
+    // keyboard; refusing to focus here leaves the edit session open with no
+    // keyboard and nothing to type into, which reads as the editor closing.
+    const restoreMatchMedia = mockPointerCoarse(true);
+    try {
+      const baseProps = createPromptBoxProps({ value: "", focusEndKey: 0 });
+      const view = render(<PromptBoxInternal {...baseProps} />);
+      const editor = getPromptEditorElement();
+
+      act(() => editor.focus());
+      act(() => editor.blur());
+      expect(document.activeElement).not.toBe(editor);
+
+      view.rerender(
+        <PromptBoxInternal
+          {...baseProps}
+          value="queued message text"
+          focusEndKey={1}
+        />,
+      );
+
+      expect(document.activeElement).toBe(editor);
+    } finally {
+      restoreMatchMedia();
+    }
+  });
+
+  it("still refuses to summon the keyboard onto a composer nobody touched", () => {
+    // The original reason for the touch guard: opening or updating a composer
+    // in the background must not raise the keyboard over the destination.
+    const restoreMatchMedia = mockPointerCoarse(true);
+    try {
+      const baseProps = createPromptBoxProps({ value: "", focusEndKey: 0 });
+      const view = render(<PromptBoxInternal {...baseProps} />);
+      const editor = getPromptEditorElement();
+
+      view.rerender(
+        <PromptBoxInternal
+          {...baseProps}
+          value="restored draft"
+          focusEndKey={1}
+        />,
+      );
+
+      expect(document.activeElement).not.toBe(editor);
+    } finally {
+      restoreMatchMedia();
+    }
+  });
+});
+
 describe("PromptBoxInternal submit shortcuts", () => {
   it("continues to submit unmodified Enter on a fine-pointer device", () => {
     const restoreMatchMedia = mockPointerCoarse(false);
