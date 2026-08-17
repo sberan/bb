@@ -2577,6 +2577,10 @@ export function PromptBoxInternal({
     voice !== undefined && voice.isSupported && !isSubmitting;
   const showVoiceAsPrimaryAction =
     isPointerCoarse && !hasSubmittableInput && canStartVoiceInput;
+  // Stop and voice are otherwise mutually exclusive branches of the single
+  // compact action slot, and Stop wins for the entire duration of a run.
+  const showVoiceBesideStop =
+    isPointerCoarse && showStop && !hasSubmittableInput && canStartVoiceInput;
   const handleVoicePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLButtonElement>) => {
       if (!isPointerCoarse || event.button !== 0) return;
@@ -3482,6 +3486,30 @@ export function PromptBoxInternal({
                   data-promptbox-submit-group=""
                   className="flex shrink-0 flex-row items-center"
                 >
+                  {/* Compact layout renders a single action, and Stop claims it
+                      whenever a run is active — so on a phone the microphone
+                      disappears for the whole run, which is exactly when you
+                      want to queue a spoken follow-up. Show it alongside Stop
+                      rather than instead of it. */}
+                  {showVoiceBesideStop ? (
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      aria-label="Start voice input"
+                      disabled={!canStartVoiceInput}
+                      onPointerDown={handleVoicePointerDown}
+                      onClick={startVoiceInput}
+                      className={cn(
+                        showCompactLayout
+                          ? COMPACT_PROMPT_ACTION_BUTTON_CLASS
+                          : COARSE_POINTER_PROMPT_ICON_ACTION_BUTTON_CLASS,
+                        "mr-1",
+                      )}
+                    >
+                      <Icon name="Mic" className="size-4" />
+                    </Button>
+                  ) : null}
                   {showStop ? (
                     <Button
                       data-promptbox-submit-action=""
