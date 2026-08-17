@@ -310,6 +310,49 @@ describe("useMobileVisualViewportHeight", () => {
       expect(window.scrollTo).not.toHaveBeenCalled();
     });
   });
+
+  it("drops the bottom safe-area inset only while a keyboard covers it", async () => {
+    // The inset clears the home indicator. A software keyboard already covers
+    // it, so holding the inset open leaves a dead band between the composer
+    // and the keyboard.
+    const visualViewport = new FakeVisualViewport();
+    visualViewport.offsetTop = 0;
+    await withElementClientHeight(
+      document.body,
+      () => 500,
+      async () =>
+        withFakeVisualViewport(visualViewport, async () => {
+          render(<VisualViewportShell enabled />);
+          const shellHeightRoot = screen.getByTestId("shell-height-root");
+          const keyboardInset = () =>
+            shellHeightRoot.style.getPropertyValue("--bb-keyboard-safe-bottom");
+
+          expect(keyboardInset()).toBe("");
+
+          // Browser chrome appearing is not a keyboard.
+          act(() => {
+            visualViewport.height = 460;
+            visualViewport.dispatchEvent(new Event("resize"));
+          });
+          await waitFor(() =>
+            expect(screen.getByTestId("shell").style.height).toBe("460px"),
+          );
+          expect(keyboardInset()).toBe("");
+
+          act(() => {
+            visualViewport.height = 300;
+            visualViewport.dispatchEvent(new Event("resize"));
+          });
+          await waitFor(() => expect(keyboardInset()).toBe("0px"));
+
+          act(() => {
+            visualViewport.height = 500;
+            visualViewport.dispatchEvent(new Event("resize"));
+          });
+          await waitFor(() => expect(keyboardInset()).toBe(""));
+        }),
+    );
+  });
 });
 
 describe("shouldRestoreIOSViewportOnKeyboardDismissal", () => {

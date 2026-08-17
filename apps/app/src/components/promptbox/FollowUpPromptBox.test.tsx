@@ -171,6 +171,21 @@ vi.mock("@/components/thread/timeline", () => ({
   ThreadContextWindowIndicator: () => null,
 }));
 
+/**
+ * Props with a known composer draft. Compact/expanded is a function of the
+ * draft now, so most mobile cases have to state what the composer holds.
+ */
+function createPropsWithMessage(
+  submitMode: FollowUpSubmitMode,
+  message: string,
+) {
+  const props = createFollowUpPromptBoxProps(submitMode);
+  const composer = props.composer;
+  if (composer === null) throw new Error("Missing composer");
+  composer.message = message;
+  return { props, composer };
+}
+
 function createFollowUpPromptBoxProps(
   submitMode: FollowUpSubmitMode,
 ): Parameters<typeof FollowUpPromptBox>[0] {
@@ -653,7 +668,7 @@ describe("FollowUpPromptBox", () => {
 
   it("starts as a single compact row on mobile without size controls", () => {
     mocks.isCompactViewport = true;
-    const props = createFollowUpPromptBoxProps({ kind: "ready" });
+    const { props } = createPropsWithMessage({ kind: "ready" }, "");
     props.environmentSummary = <span>Local environment</span>;
     render(<FollowUpPromptBox {...props} />);
 
@@ -667,308 +682,80 @@ describe("FollowUpPromptBox", () => {
     ).toBeNull();
   });
 
-  it("collapses after a pointer submission when the keyboard viewport settles", async () => {
+  it("expands on mobile because there is something to send, not because of focus", () => {
     mocks.isCompactViewport = true;
-    mocks.isPointerCoarse = true;
-    const originalDescriptor = Object.getOwnPropertyDescriptor(
-      window,
-      "visualViewport",
-    );
-    const visualViewport = Object.assign(new EventTarget(), { height: 500 });
-    Object.defineProperty(window, "visualViewport", {
-      configurable: true,
-      value: visualViewport,
-    });
-    const props = createFollowUpPromptBoxProps({ kind: "ready" });
-
-    try {
-      render(<FollowUpPromptBox {...props} />);
-      const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
-      act(() => input.focus());
-      act(() => {
-        visualViewport.height = 300;
-        visualViewport.dispatchEvent(new Event("resize"));
-      });
-      await waitFor(() =>
-        expect(
-          screen.getByTestId("prompt-box").getAttribute("data-compact"),
-        ).toBe("false"),
-      );
-
-      fireEvent.click(screen.getByRole("button", { name: "Submit" }), {
-        detail: 1,
-      });
-
-      expect(props.composer?.onSubmit).toHaveBeenCalledOnce();
-      expect(
-        screen.getByTestId("prompt-box").getAttribute("data-compact"),
-      ).toBe("false");
-
-      await act(
-        () =>
-          new Promise<void>((resolve) => {
-            window.requestAnimationFrame(() => resolve());
-          }),
-      );
-      expect(
-        screen.getByTestId("prompt-box").getAttribute("data-compact"),
-      ).toBe("false");
-
-      act(() => {
-        visualViewport.height = 500;
-        visualViewport.dispatchEvent(new Event("resize"));
-      });
-      await waitFor(() =>
-        expect(
-          screen.getByTestId("prompt-box").getAttribute("data-compact"),
-        ).toBe("true"),
-      );
-    } finally {
-      if (originalDescriptor) {
-        Object.defineProperty(window, "visualViewport", originalDescriptor);
-      } else {
-        Reflect.deleteProperty(window, "visualViewport");
-      }
-    }
-  });
-
-  it("expands while focus is within the mobile composer", () => {
-    mocks.isCompactViewport = true;
-    const props = createFollowUpPromptBoxProps({ kind: "ready" });
+    const { props } = createPropsWithMessage({ kind: "ready" }, "Follow up");
     props.environmentSummary = <span>Local environment</span>;
     render(<FollowUpPromptBox {...props} />);
-
-    const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
-    const submit = screen.getByRole("button", { name: "Submit" });
-    act(() => input.focus());
 
     expect(screen.getByTestId("prompt-box").getAttribute("data-compact")).toBe(
       "false",
     );
     expect(screen.getByText("Local environment")).toBeTruthy();
+  });
 
-    fireEvent.blur(input, { relatedTarget: submit });
-    fireEvent.focus(submit);
+  it("expands on mobile for an attachment with no text", () => {
+    mocks.isCompactViewport = true;
+    const { props } = createPropsWithMessage({ kind: "ready" }, "");
+    props.attachments.items = [
+      { id: "att_1", name: "screenshot.png", mimeType: "image/png" },
+    ] as unknown as typeof props.attachments.items;
+    render(<FollowUpPromptBox {...props} />);
+
     expect(screen.getByTestId("prompt-box").getAttribute("data-compact")).toBe(
       "false",
     );
   });
 
-  it("does not move the mobile input before the first tap can focus it", () => {
+  it("expands in the same frame as the focus that asked for it", async () => {
+    // Expansion used to wait for a visual-viewport resize, or 350ms when iOS
+    // never reported one, and then tween `height` for another 240ms. No timers
+    // are advanced and no viewport event is dispatched here: focusing has to
+    // be enough on its own.
     mocks.isCompactViewport = true;
-    render(
-      <FollowUpPromptBox
-        {...createFollowUpPromptBoxProps({ kind: "ready" })}
-      />,
-    );
+    mocks.isPointerCoarse = true;
+    const { props } = createPropsWithMessage({ kind: "ready" }, "");
+    props.environmentSummary = <span>Local environment</span>;
+    render(<FollowUpPromptBox {...props} />);
     const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
 
-    fireEvent.pointerDown(input);
     expect(screen.getByTestId("prompt-box").getAttribute("data-compact")).toBe(
       "true",
     );
 
-    fireEvent.focus(input);
+    act(() => input.focus());
     expect(screen.getByTestId("prompt-box").getAttribute("data-compact")).toBe(
       "false",
     );
+    expect(screen.getByText("Local environment")).toBeTruthy();
+
+    act(() => input.blur());
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("prompt-box").getAttribute("data-compact"),
+      ).toBe("true"),
+    );
   });
 
-  it("coordinates coarse-pointer expansion with a visual viewport change", async () => {
+  it("stays expanded on mobile while a draft survives losing focus", async () => {
     mocks.isCompactViewport = true;
     mocks.isPointerCoarse = true;
-    const originalDescriptor = Object.getOwnPropertyDescriptor(
-      window,
-      "visualViewport",
-    );
-    const visualViewport = Object.assign(new EventTarget(), { height: 500 });
-    Object.defineProperty(window, "visualViewport", {
-      configurable: true,
-      value: visualViewport,
-    });
-
-    try {
-      render(
-        <FollowUpPromptBox
-          {...createFollowUpPromptBoxProps({ kind: "ready" })}
-        />,
-      );
-      const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
-
-      fireEvent.focus(input);
-      expect(
-        screen.getByTestId("prompt-box").getAttribute("data-compact"),
-      ).toBe("true");
-
-      act(() => {
-        visualViewport.height = 460;
-        visualViewport.dispatchEvent(new Event("resize"));
-      });
-      expect(
-        screen.getByTestId("prompt-box").getAttribute("data-compact"),
-      ).toBe("true");
-
-      act(() => {
-        visualViewport.height = 300;
-        visualViewport.dispatchEvent(new Event("resize"));
-      });
-      await vi.waitFor(() =>
-        expect(
-          screen.getByTestId("prompt-box").getAttribute("data-compact"),
-        ).toBe("false"),
-      );
-    } finally {
-      if (originalDescriptor) {
-        Object.defineProperty(window, "visualViewport", originalDescriptor);
-      } else {
-        Reflect.deleteProperty(window, "visualViewport");
-      }
-    }
-  });
-
-  it("stays expanded during a timeline gesture and collapses when focus leaves", async () => {
-    mocks.isCompactViewport = true;
-    render(
-      <>
-        <FollowUpPromptBox
-          {...createFollowUpPromptBoxProps({ kind: "ready" })}
-        />
-        <button type="button">Outside composer</button>
-      </>,
-    );
-    const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
-    const outside = screen.getByRole("button", { name: "Outside composer" });
-
-    act(() => input.focus());
-    fireEvent.pointerDown(outside);
-
-    expect(document.activeElement).toBe(input);
-    expect(screen.getByTestId("prompt-box").getAttribute("data-compact")).toBe(
-      "false",
-    );
-
-    act(() => outside.focus());
-
-    await waitFor(() =>
-      expect(
-        screen.getByTestId("prompt-box").getAttribute("data-compact"),
-      ).toBe("true"),
-    );
-  });
-
-  it("stays expanded while a composer-owned overlay is open", async () => {
-    mocks.isCompactViewport = true;
-    render(
-      <>
-        <FollowUpPromptBox
-          {...createFollowUpPromptBoxProps({ kind: "ready" })}
-        />
-        <button type="button">Portaled picker content</button>
-      </>,
-    );
-    const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
-    const trigger = screen.getByRole("button", { name: "Submit" });
-    const portaledContent = screen.getByRole("button", {
-      name: "Portaled picker content",
-    });
-    trigger.setAttribute("aria-haspopup", "menu");
-    trigger.setAttribute("aria-expanded", "true");
-    act(() => input.focus());
-
-    fireEvent.pointerDown(portaledContent);
-    act(() => portaledContent.focus());
-
-    expect(screen.getByTestId("prompt-box").getAttribute("data-compact")).toBe(
-      "false",
-    );
-
-    trigger.setAttribute("aria-expanded", "false");
-    act(() => trigger.focus());
-    act(() => portaledContent.focus());
-    await waitFor(() =>
-      expect(
-        screen.getByTestId("prompt-box").getAttribute("data-compact"),
-      ).toBe("true"),
-    );
-  });
-
-  it("stays expanded after pressing a non-focusable composer control", () => {
-    mocks.isCompactViewport = true;
-    const props = createFollowUpPromptBoxProps({ kind: "ready" });
-    props.environmentSummary = (
-      <button type="button" disabled>
-        Read only mode
-      </button>
-    );
+    const { props } = createPropsWithMessage({ kind: "ready" }, "Follow up");
     render(<FollowUpPromptBox {...props} />);
     const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
-    act(() => input.focus());
 
-    fireEvent.pointerDown(
-      screen.getByRole("button", { name: "Read only mode" }),
+    act(() => input.focus());
+    act(() => input.blur());
+    await act(
+      () =>
+        new Promise<void>((resolve) => {
+          window.requestAnimationFrame(() => resolve());
+        }),
     );
 
     expect(screen.getByTestId("prompt-box").getAttribute("data-compact")).toBe(
       "false",
     );
-  });
-
-  it("collapses after the keyboard-dismissal fallback timeout", () => {
-    mocks.isCompactViewport = true;
-    mocks.isPointerCoarse = true;
-    vi.useFakeTimers();
-    const originalDescriptor = Object.getOwnPropertyDescriptor(
-      window,
-      "visualViewport",
-    );
-    const visualViewport = Object.assign(new EventTarget(), { height: 500 });
-    Object.defineProperty(window, "visualViewport", {
-      configurable: true,
-      value: visualViewport,
-    });
-
-    try {
-      render(
-        <FollowUpPromptBox
-          {...createFollowUpPromptBoxProps({ kind: "ready" })}
-        />,
-      );
-      const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
-      act(() => input.focus());
-      act(() => {
-        visualViewport.height = 300;
-        visualViewport.dispatchEvent(new Event("resize"));
-        vi.advanceTimersByTime(20);
-      });
-      expect(
-        screen.getByTestId("prompt-box").getAttribute("data-compact"),
-      ).toBe("false");
-
-      act(() => {
-        input.blur();
-        vi.advanceTimersByTime(20);
-      });
-      expect(
-        screen.getByTestId("prompt-box").getAttribute("data-compact"),
-      ).toBe("false");
-
-      act(() => vi.advanceTimersByTime(700));
-      expect(
-        screen.getByTestId("prompt-box").getAttribute("data-compact"),
-      ).toBe("false");
-
-      act(() => vi.advanceTimersByTime(100));
-      expect(
-        screen.getByTestId("prompt-box").getAttribute("data-compact"),
-      ).toBe("true");
-    } finally {
-      vi.useRealTimers();
-      if (originalDescriptor) {
-        Object.defineProperty(window, "visualViewport", originalDescriptor);
-      } else {
-        Reflect.deleteProperty(window, "visualViewport");
-      }
-    }
   });
 
   it("keeps the full composer visible on desktop", () => {
@@ -999,44 +786,27 @@ describe("FollowUpPromptBox", () => {
     },
   );
 
-  it("exposes focus state so narrow prompt containers can expand", async () => {
-    render(
-      <>
-        <FollowUpPromptBox
-          {...createFollowUpPromptBoxProps({ kind: "ready" })}
-        />
-        <button type="button">Outside composer</button>
-      </>,
+  it("exposes expanded state so narrow prompt containers can follow it", () => {
+    mocks.isCompactViewport = true;
+    const { props, composer: composerProps } = createPropsWithMessage(
+      { kind: "ready" },
+      "",
     );
+    const { rerender } = render(<FollowUpPromptBox {...props} />);
     const composer = document.querySelector("[data-follow-up-composer]");
-    const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
 
     expect(composer?.hasAttribute("data-follow-up-composer-expanded")).toBe(
       false,
     );
-    expect(screen.getByTestId("prompt-box").dataset.heightAnimationKey).toBe(
-      "compact",
-    );
 
-    act(() => input.focus());
+    rerender(
+      <FollowUpPromptBox
+        {...props}
+        composer={{ ...composerProps, message: "Follow up" }}
+      />,
+    );
     expect(composer?.hasAttribute("data-follow-up-composer-expanded")).toBe(
       true,
-    );
-    expect(screen.getByTestId("prompt-box").dataset.heightAnimationKey).toBe(
-      "expanded",
-    );
-
-    fireEvent.pointerDown(
-      screen.getByRole("button", { name: "Outside composer" }),
-    );
-    act(() => screen.getByRole("button", { name: "Outside composer" }).focus());
-    await waitFor(() =>
-      expect(composer?.hasAttribute("data-follow-up-composer-expanded")).toBe(
-        false,
-      ),
-    );
-    expect(screen.getByTestId("prompt-box").dataset.heightAnimationKey).toBe(
-      "compact",
     );
   });
 
@@ -1061,6 +831,7 @@ describe("FollowUpPromptBox", () => {
       reason: "stopping",
     });
     if (props.composer === null) throw new Error("Missing composer");
+    props.composer.message = "";
     props.composer.compactPromptPlaceholder = "Stopping side chat...";
     props.composer.promptPlaceholder = "Stopping side chat...";
     render(<FollowUpPromptBox {...props} />);

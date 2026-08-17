@@ -18,6 +18,13 @@ export function shouldRestoreIOSViewportOnKeyboardDismissal({
   return isAppleWebKit && isIOSDevice;
 }
 
+/**
+ * How much shorter than its containing block the visible viewport has to get
+ * before the shrinkage is read as a software keyboard rather than browser
+ * chrome appearing or a rounding difference.
+ */
+const KEYBOARD_VIEWPORT_MIN_DELTA_PX = 80;
+
 function getVisualViewportPageTop(visualViewport: VisualViewport) {
   return Math.round(window.scrollY + visualViewport.offsetTop);
 }
@@ -59,6 +66,7 @@ export function useMobileVisualViewportHeight(
       shell.style.removeProperty("top");
       shell.style.removeProperty("height");
       shellHeightRoot.style.removeProperty("--bb-shell-height");
+      shellHeightRoot.style.removeProperty("--bb-keyboard-safe-bottom");
     };
     const updateHeight = () => {
       animationFrame = null;
@@ -101,6 +109,19 @@ export function useMobileVisualViewportHeight(
         "--bb-shell-height",
         `${visualViewportHeight}px`,
       );
+      // The bottom safe-area inset exists to clear the home indicator. A
+      // software keyboard already covers it, so keeping the inset while the
+      // keyboard is up leaves a band of dead space between the composer and
+      // the keyboard. Publish an override the layout can fall back out of, so
+      // the inset returns the moment the keyboard does.
+      if (
+        shellContainingBlockHeight - visualViewportHeight >=
+        KEYBOARD_VIEWPORT_MIN_DELTA_PX
+      ) {
+        shellHeightRoot.style.setProperty("--bb-keyboard-safe-bottom", "0px");
+      } else {
+        shellHeightRoot.style.removeProperty("--bb-keyboard-safe-bottom");
+      }
     };
     const scheduleUpdate = () => {
       if (animationFrame !== null) {
