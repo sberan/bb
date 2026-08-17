@@ -1120,16 +1120,12 @@ export function QueuedMessagesList({
     setInlineEditorDesiredHeight((currentHeight) =>
       currentHeight === desiredHeight ? currentHeight : desiredHeight,
     );
-    // The surface height is animated. ResizeObserver calls this throughout the
-    // transition, so re-align the neighborhood as usable space appears instead
-    // of leaving the editor pinned to the top based on the first, short frame.
-    scrollInlineEditorNeighborhoodIntoView();
-  }, [
-    getScrollElement,
-    inlineEditorActive,
-    scrollInlineEditorNeighborhoodIntoView,
-    scrollRef,
-  ]);
+    // Re-aligning the neighborhood used to happen here too, because the
+    // animated surface revealed its usable space over many frames. The height
+    // change now lands in one frame, and the layout effect below already
+    // re-aligns whenever it changes — doing it here as well meant two scroll
+    // writes per measurement.
+  }, [getScrollElement, inlineEditorActive, scrollRef]);
 
   useLayoutEffect(() => {
     measureInlineEditorMaxHeight();
@@ -1139,13 +1135,23 @@ export function QueuedMessagesList({
     const surface = surfaceRef.current;
     const composerShell = surface?.closest<HTMLElement>("[data-app-composer]");
     const container = composerShell?.parentElement;
-    const animationFrame = window.requestAnimationFrame(
-      measureInlineEditorMaxHeight,
-    );
+    // Six observed elements, several of which resize as a consequence of what
+    // this measurement sets. Coalescing to one run per frame keeps a burst of
+    // entries — or a resize event landing in the same frame — from measuring
+    // and re-rendering the queue several times over.
+    let scheduledFrame: number | null = null;
+    const scheduleMeasure = () => {
+      if (scheduledFrame !== null) return;
+      scheduledFrame = window.requestAnimationFrame(() => {
+        scheduledFrame = null;
+        measureInlineEditorMaxHeight();
+      });
+    };
+    scheduleMeasure();
     const resizeObserver =
       typeof ResizeObserver === "undefined"
         ? null
-        : new ResizeObserver(measureInlineEditorMaxHeight);
+        : new ResizeObserver(scheduleMeasure);
     if (viewport) resizeObserver?.observe(viewport);
     if (surface) resizeObserver?.observe(surface);
     if (listRef.current) resizeObserver?.observe(listRef.current);
@@ -1155,11 +1161,11 @@ export function QueuedMessagesList({
     if (editorElement) resizeObserver?.observe(editorElement);
     if (composerShell) resizeObserver?.observe(composerShell);
     if (container) resizeObserver?.observe(container);
-    window.addEventListener("resize", measureInlineEditorMaxHeight);
+    window.addEventListener("resize", scheduleMeasure);
     return () => {
-      window.cancelAnimationFrame(animationFrame);
+      if (scheduledFrame !== null) window.cancelAnimationFrame(scheduledFrame);
       resizeObserver?.disconnect();
-      window.removeEventListener("resize", measureInlineEditorMaxHeight);
+      window.removeEventListener("resize", scheduleMeasure);
     };
   }, [getScrollElement, inlineEditorActive, measureInlineEditorMaxHeight]);
 
@@ -1528,8 +1534,19 @@ export function QueuedMessagesList({
         inlineEditor
           ? "mb-0 rounded-xl pb-4"
           : "-mb-5 rounded-xl rounded-b-none border-b-0 pb-3",
+        // Animating height while the inline editor is open is a trap: a
+        // ResizeObserver watches this same element to decide how tall it
+        // should be, so every frame of the 260ms tween re-ran the measurement
+        // — which re-rendered the whole queue — and every keystroke restarted
+        // the tween. Typing held it in permanent thrash. Opening and closing
+        // the surface still animates; resizing it to fit what you are typing
+        // now lands in one frame.
         !surfaceDragging &&
+          !inlineEditor &&
           "transition-[height,margin,border-radius,padding] duration-[260ms] ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none",
+        !surfaceDragging &&
+          inlineEditor &&
+          "transition-[margin,border-radius,padding] duration-[260ms] ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none",
       )}
     >
       <header

@@ -331,6 +331,51 @@ describe("QueuedMessagesList", () => {
     }
   });
 
+  it("does not animate the surface height while inline editing", () => {
+    // A ResizeObserver on this surface decides how tall it should be, so an
+    // animated height re-ran the measurement on every frame of the tween and
+    // every keystroke restarted it. Opening and closing still animates.
+    const queuedMessages = [
+      makeQueuedMessage("q_one", "First queued message"),
+      makeQueuedMessage("q_two", "Second queued message"),
+    ];
+    const renderList = (editing: boolean) => (
+      <QueuedMessagesList
+        queuedMessages={queuedMessages}
+        inlineEditor={
+          editing
+            ? {
+                queuedMessageId: "q_two",
+                queuedMessageIndex: 1,
+                content: <div>Inline editor</div>,
+                onDismiss: noop,
+              }
+            : undefined
+        }
+        sendDisabled={false}
+        actionDisabled={false}
+        processingMessageId={null}
+        processingAction={null}
+        onSendImmediately={noop}
+        onReorder={noop}
+        onSetGroupBoundary={noop}
+        onEdit={noop}
+        onDelete={noop}
+      />
+    );
+
+    const { container, rerender } = render(renderList(true));
+    const surface = container.querySelector('[aria-label="Queued messages"]');
+    expect(surface?.className).not.toContain("transition-[height");
+    // The other geometry still eases; only height is exempt.
+    expect(surface?.className).toContain("transition-[margin");
+
+    rerender(renderList(false));
+    expect(
+      container.querySelector('[aria-label="Queued messages"]')?.className,
+    ).toContain("transition-[height");
+  });
+
   it("replaces the edited row with the real inline composer", () => {
     const onDismiss = vi.fn();
     const queuedMessages = [
@@ -769,11 +814,26 @@ describe("QueuedMessagesList", () => {
     if (!scroll) return;
     scroll.scrollTop = 100;
 
+    // Measurement is coalesced into an animation frame, and the realignment
+    // follows the surface height it produces, so let both settle.
+    const settle = async () => {
+      for (let pass = 0; pass < 3; pass += 1) {
+        await act(
+          () =>
+            new Promise<void>((resolve) => {
+              window.requestAnimationFrame(() => resolve());
+            }),
+        );
+      }
+    };
+
     act(() => notifyResize());
+    await settle();
     expect(scroll.scrollTop).toBe(100);
 
     queueViewportBottom = 300;
     act(() => notifyResize());
+    await settle();
     expect(scroll.scrollTop).toBe(60);
   });
 
