@@ -331,6 +331,70 @@ describe("QueuedMessagesList", () => {
     }
   });
 
+  it("keeps the end of a too-tall edit on screen so its controls stay reachable", () => {
+    // The inline editor carries the row that saves or discards the edit at its
+    // bottom. When the draft is taller than the surface allows, the surface
+    // scrolls internally, and aligning the editor's top put that row below the
+    // fold — the edit could be typed but not committed.
+    const viewport = document.createElement("div");
+    Object.defineProperty(viewport, "clientHeight", { value: 500 });
+    bottomAnchorMocks.scrollElement = viewport;
+
+    const nativeGetBoundingClientRect =
+      HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+      function (this: HTMLElement) {
+        if (this.getAttribute("aria-label") === "Queued messages") {
+          return new DOMRect(0, 0, 600, 240);
+        }
+        if (this.hasAttribute("data-queued-messages-scroll")) {
+          // Visible window for the queue's own scroller: 32 → 212.
+          return new DOMRect(0, 32, 600, 180);
+        }
+        const queueScrollTop =
+          this.closest<HTMLElement>("[data-queued-messages-scroll]")
+            ?.scrollTop ?? 0;
+        if (this.hasAttribute("data-queued-message-inline-editor")) {
+          // Taller than the window, and currently overhanging its bottom.
+          return new DOMRect(0, 60 - queueScrollTop, 600, 300);
+        }
+        return nativeGetBoundingClientRect.call(this);
+      },
+    );
+
+    const { container } = render(
+      <div data-app-composer="">
+        <QueuedMessagesList
+          queuedMessages={[makeQueuedMessage("q_editing", "Edited message")]}
+          inlineEditor={{
+            queuedMessageId: "q_editing",
+            queuedMessageIndex: 0,
+            content: <div>Inline editor</div>,
+            onDismiss: noop,
+          }}
+          sendDisabled={false}
+          actionDisabled={false}
+          processingMessageId={null}
+          processingAction={null}
+          onSendImmediately={noop}
+          onReorder={noop}
+          onSetGroupBoundary={noop}
+          onEdit={noop}
+          onDelete={noop}
+        />
+      </div>,
+    );
+
+    const scroll = container.querySelector<HTMLElement>(
+      "[data-queued-messages-scroll]",
+    );
+    expect(scroll).not.toBeNull();
+    if (!scroll) return;
+
+    // editor bottom (60 + 300) minus window bottom (212) = 148.
+    expect(scroll.scrollTop).toBe(148);
+  });
+
   it("does not animate the surface height while inline editing", () => {
     // A ResizeObserver on this surface decides how tall it should be, so an
     // animated height re-ran the measurement on every frame of the tween and
@@ -827,10 +891,16 @@ describe("QueuedMessagesList", () => {
       }
     };
 
+    // The editor (180) is taller than the surface's viewport (148), so it has
+    // to give up one end. It gives up the top: 132 puts the editor's bottom
+    // edge on the viewport's, keeping the caret and the save/discard controls
+    // on screen. Pinning the top instead left the save button unreachable.
     act(() => notifyResize());
     await settle();
-    expect(scroll.scrollTop).toBe(100);
+    expect(scroll.scrollTop).toBe(132);
 
+    // Once the surface has room for the whole neighborhood, both neighbours
+    // win out over the editor's own edges.
     queueViewportBottom = 300;
     act(() => notifyResize());
     await settle();

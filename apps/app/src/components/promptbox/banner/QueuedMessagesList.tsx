@@ -1051,7 +1051,12 @@ export function QueuedMessagesList({
     } else {
       const editorRect = editorElement.getBoundingClientRect();
       if (editorRect.height > viewportRect.height) {
-        delta = editorRect.top - viewportRect.top;
+        // An editor taller than the space it gets has to give up one end. Show
+        // the bottom: that is where the caret sits after a draft is restored,
+        // and where the row of controls that saves or discards the edit lives.
+        // Pinning the top instead left the save button below the fold with the
+        // start of text — the least useful part — occupying the screen.
+        delta = editorRect.bottom - viewportRect.bottom;
       } else if (editorRect.top < viewportRect.top) {
         delta = editorRect.top - viewportRect.top;
       } else if (editorRect.bottom > viewportRect.bottom) {
@@ -1120,12 +1125,24 @@ export function QueuedMessagesList({
     setInlineEditorDesiredHeight((currentHeight) =>
       currentHeight === desiredHeight ? currentHeight : desiredHeight,
     );
-    // Re-aligning the neighborhood used to happen here too, because the
-    // animated surface revealed its usable space over many frames. The height
-    // change now lands in one frame, and the layout effect below already
-    // re-aligns whenever it changes — doing it here as well meant two scroll
-    // writes per measurement.
-  }, [getScrollElement, inlineEditorActive, scrollRef]);
+    // The editor can be taller than the space the surface is allowed, in which
+    // case the surface scrolls internally and the composer's own action row —
+    // the one that saves the edit — sits below the fold. Nothing else brings it
+    // back: the layout effect below only fires when the surface height changes,
+    // and a clamped surface stays exactly the same height while the text inside
+    // it grows. Realign here, where the content was just measured.
+    //
+    // This used to be the expensive part of this function, because the surface
+    // animated its height and a ResizeObserver on it re-entered this on every
+    // frame of the tween. The tween is gone while editing and these passes are
+    // coalesced to one per frame, so the cost is now bounded.
+    scrollInlineEditorNeighborhoodIntoView();
+  }, [
+    getScrollElement,
+    inlineEditorActive,
+    scrollInlineEditorNeighborhoodIntoView,
+    scrollRef,
+  ]);
 
   useLayoutEffect(() => {
     measureInlineEditorMaxHeight();
