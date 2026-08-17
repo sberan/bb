@@ -202,8 +202,14 @@ const PROMPTBOX_MAX_HEIGHT_BY_LAYOUT: Record<ZenModeLayout, string> = {
   "root-compose": "70dvh",
 };
 
+// grid-template-rows cannot be composited, so this drives a full layout on every
+// frame for 180ms. On a phone that lands at the worst possible moment: focusing
+// the composer expands it while the keyboard is animating in, and starting voice
+// input expands it again — non-compositable animation competing with the
+// keyboard for a main thread that is often already busy streaming a response.
+// The end state is identical either way, so coarse pointers get it immediately.
 const COLLAPSING_GRID_CLASS =
-  "grid transition-[grid-template-rows] duration-[180ms] ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none";
+  "grid transition-[grid-template-rows] duration-[180ms] ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none max-md:pointer-coarse:transition-none";
 const VOICE_ACTION_TRANSITION_MS = 180;
 type VoiceActionTransition = "entering" | "active" | "exiting";
 
@@ -2635,6 +2641,37 @@ export function PromptBoxInternal({
     resetZenModeAfterSubmit();
   }, [canSubmit, onSubmit, resetZenModeAfterSubmit]);
 
+  // Transcribe-and-send. Speaking a message otherwise costs three taps (mic,
+  // confirm, send); this collapses the last two.
+  //
+  // The submit cannot happen when the transcript arrives: insertTextAtCursor
+  // updates the parent draft on the next render, so `canSubmit` is still false
+  // at that moment. Wait for voice to settle back to idle, then submit on a
+  // following render — the same deferral the pending-command submit uses.
+  const submitAfterVoiceRef = useRef(false);
+  const [pendingVoiceSubmit, setPendingVoiceSubmit] = useState(false);
+
+  const handleVoiceConfirmAndSend = useCallback(() => {
+    submitAfterVoiceRef.current = true;
+    voice?.stop();
+  }, [voice]);
+
+  const voiceState = voice?.state;
+  useEffect(() => {
+    if (!submitAfterVoiceRef.current) return;
+    // "error" also lands here: a failed transcription must clear the intent
+    // rather than submit whatever happened to be in the composer already.
+    if (voiceState === "recording" || voiceState === "transcribing") return;
+    submitAfterVoiceRef.current = false;
+    if (voiceState === "idle") setPendingVoiceSubmit(true);
+  }, [voiceState]);
+
+  useEffect(() => {
+    if (!pendingVoiceSubmit) return;
+    setPendingVoiceSubmit(false);
+    submitPrompt();
+  }, [pendingVoiceSubmit, submitPrompt]);
+
   const handleSubmitClick = useCallback(
     (event: ReactMouseEvent<HTMLButtonElement>) => {
       // Pointer-generated click events have a positive click count. Keyboard
@@ -3361,6 +3398,12 @@ export function PromptBoxInternal({
                     stream={voice.stream}
                     onConfirm={voice.stop}
                     onCancel={cancelVoiceInput}
+                    onConfirmAndSend={handleVoiceConfirmAndSend}
+                    sendLabel={
+                      // Reuse the submit button's own label so a busy thread
+                      // says it will queue rather than promising to send.
+                      effectiveSubmitTitle
+                    }
                   />
                 </div>
               ) : null}

@@ -6,8 +6,20 @@ import { WaveformVisualizer } from "./WaveformVisualizer.js";
 interface VoiceRecordingBarProps {
   state: "recording" | "transcribing";
   stream: MediaStream | null;
+  /** Transcribe into the composer and stop there, leaving the text editable. */
   onConfirm: () => void;
   onCancel: () => void;
+  /**
+   * Transcribe and submit in one action, so a spoken message costs two taps
+   * instead of three. Omitted when there is nothing to submit to, in which case
+   * only the insert action is shown.
+   */
+  onConfirmAndSend?: () => void;
+  /**
+   * Label for the send action. A busy thread queues rather than interrupting,
+   * so the control says which one will happen instead of always saying "send".
+   */
+  sendLabel?: string;
 }
 
 const CONTROL_BUTTON_CLASS =
@@ -18,6 +30,8 @@ export function VoiceRecordingBar({
   stream,
   onConfirm,
   onCancel,
+  onConfirmAndSend,
+  sendLabel = "Send",
 }: VoiceRecordingBarProps) {
   const isTranscribing = state === "transcribing";
 
@@ -45,10 +59,13 @@ export function VoiceRecordingBar({
           {isTranscribing ? "Transcribing" : "Recording"}
         </span>
       </div>
+      {/* Insert and send sit side by side so the common case (say it, send it)
+          is one tap, while a message worth proofreading is still one tap to
+          drop into the composer. */}
       <Button
         type="button"
         size="icon"
-        variant="default"
+        variant={onConfirmAndSend ? "ghost" : "default"}
         aria-label={
           isTranscribing
             ? "Transcribing voice input"
@@ -64,6 +81,21 @@ export function VoiceRecordingBar({
           <Icon name="Check" className="size-4" />
         )}
       </Button>
+      {onConfirmAndSend ? (
+        <Button
+          type="button"
+          size="icon"
+          variant="default"
+          aria-label={
+            isTranscribing ? "Transcribing voice input" : sendLabel
+          }
+          disabled={isTranscribing}
+          onClick={onConfirmAndSend}
+          className={CONTROL_BUTTON_CLASS}
+        >
+          <Icon name="ArrowUp" className="size-4" />
+        </Button>
+      ) : null}
     </div>
   );
 }
