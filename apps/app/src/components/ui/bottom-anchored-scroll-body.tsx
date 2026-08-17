@@ -829,6 +829,13 @@ export function BottomAnchoredScrollBody({
           ref={scrollAreaRef}
           className={cn(
             "thread-scrollbar @container/page col-start-1 row-start-1 min-h-0 overflow-x-hidden overflow-y-auto",
+            // The composer is a sticky child of this scroller, and WebKit's
+            // rubber-band translates the whole scrolled content — sticky
+            // children ride along with it. So overscrolling the transcript
+            // dragged the input away from the bottom edge under your thumb.
+            // Suppressing the bounce on touch pins it. Desktop keeps the
+            // affordance, where the composer is not under a moving finger.
+            "max-md:pointer-coarse:overscroll-y-none",
             scrollAreaClassName,
           )}
         >
