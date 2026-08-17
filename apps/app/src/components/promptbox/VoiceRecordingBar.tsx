@@ -34,6 +34,10 @@ export function VoiceRecordingBar({
   sendLabel = "Send",
 }: VoiceRecordingBarProps) {
   const isTranscribing = state === "transcribing";
+  // The stream only exists once getUserMedia has resolved, so it is the honest
+  // signal that the microphone is actually capturing rather than still being
+  // granted or opened.
+  const isLive = state === "recording" && stream !== null;
 
   return (
     <div className="flex flex-row items-center gap-2 px-2 py-1.5">
@@ -49,14 +53,39 @@ export function VoiceRecordingBar({
       >
         <Icon name="X" className="size-4" />
       </Button>
-      <div className="relative flex min-w-0 flex-1 items-center">
+      <div className="relative flex min-w-0 flex-1 items-center gap-2">
+        {/* The waveform is flat until it hears something, so it cannot
+            distinguish "still acquiring the microphone" from "listening, say
+            something". Permission prompts and device start-up make that gap
+            long enough to be confusing. This says which state you are in
+            without waiting for audio. */}
+        {!isTranscribing ? (
+          <span
+            className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground"
+            data-voice-ready={isLive ? "" : undefined}
+          >
+            <span
+              className={cn(
+                "size-2 shrink-0 rounded-full",
+                isLive
+                  ? "animate-pulse bg-destructive"
+                  : "bg-muted-foreground/40",
+              )}
+            />
+            {isLive ? "Listening" : "Starting"}
+          </span>
+        ) : null}
         <div
-          className={cn("h-7 w-full", isTranscribing && "animate-shine-icon")}
+          className={cn("h-7 min-w-0 flex-1", isTranscribing && "animate-shine-icon")}
         >
           <WaveformVisualizer stream={stream} active={!isTranscribing} />
         </div>
         <span className="sr-only" aria-live="polite">
-          {isTranscribing ? "Transcribing" : "Recording"}
+          {isTranscribing
+            ? "Transcribing"
+            : isLive
+              ? "Microphone ready, listening"
+              : "Starting microphone"}
         </span>
       </div>
       {/* Insert and send sit side by side so the common case (say it, send it)
