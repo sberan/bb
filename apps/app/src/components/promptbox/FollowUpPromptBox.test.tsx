@@ -737,6 +737,41 @@ describe("FollowUpPromptBox", () => {
     );
   });
 
+  it("keeps its own controls alive when tapping one blurs the editor", async () => {
+    // iOS does not focus a button when you tap it, so tapping a composer
+    // control blurs the editor and leaves focus on the document — which is
+    // indistinguishable from leaving the composer until the click arrives.
+    // Collapsing before then unmounts the control mid-tap and the press is
+    // lost, which killed every expanded-only button while the keyboard was up.
+    mocks.isCompactViewport = true;
+    mocks.isPointerCoarse = true;
+    const { props } = createPropsWithMessage({ kind: "ready" }, "");
+    render(<FollowUpPromptBox {...props} />);
+    const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
+
+    act(() => input.focus());
+    const control = screen.getByRole("button", { name: "Submit" });
+    expect(screen.getByTestId("prompt-box").getAttribute("data-compact")).toBe(
+      "false",
+    );
+
+    act(() => input.blur());
+    await act(
+      () =>
+        new Promise<void>((resolve) => {
+          window.requestAnimationFrame(() => resolve());
+        }),
+    );
+
+    // The click lands here, well after the frame the collapse used to run in.
+    expect(control.isConnected).toBe(true);
+    expect(screen.getByTestId("prompt-box").getAttribute("data-compact")).toBe(
+      "false",
+    );
+    fireEvent.click(control);
+    expect(props.composer?.onSubmit).toHaveBeenCalledOnce();
+  });
+
   it("stays expanded on mobile while a draft survives losing focus", async () => {
     mocks.isCompactViewport = true;
     mocks.isPointerCoarse = true;

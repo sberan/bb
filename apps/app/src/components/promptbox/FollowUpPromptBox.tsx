@@ -116,6 +116,12 @@ const FOLLOW_UP_PROMPT_BOX_ELASTIC_TARGET_HEIGHT =
   THREAD_PROMPT_CONTEXT_BANNER_ROW_HEIGHT;
 const OPEN_COMPOSER_OVERLAY_TRIGGER_SELECTOR =
   '[aria-haspopup][aria-expanded="true"]';
+/**
+ * How long a blurred composer stays expanded before collapsing. Long enough to
+ * outlast the click that a tap on one of its own controls dispatches after the
+ * blur, short enough that leaving the composer still feels immediate.
+ */
+const COMPOSER_COLLAPSE_SETTLE_MS = 250;
 const DEFAULT_FOLLOW_UP_COMPOSER_SCOPE = {
   kind: "new-thread",
   projectId: null,
@@ -376,7 +382,7 @@ function FollowUpPromptBoxWithComposer({
     isCompactViewport && !isComposerFocused && !hasComposerContent;
   const cancelPendingFocusLoss = useCallback(() => {
     if (pendingFocusLossFrameRef.current === null) return;
-    window.cancelAnimationFrame(pendingFocusLossFrameRef.current);
+    window.clearTimeout(pendingFocusLossFrameRef.current);
     pendingFocusLossFrameRef.current = null;
   }, []);
   const handleComposerFocus = useCallback(() => {
@@ -385,14 +391,22 @@ function FollowUpPromptBoxWithComposer({
   }, [cancelPendingFocusLoss]);
   const handleComposerBlur = useCallback(() => {
     cancelPendingFocusLoss();
-    pendingFocusLossFrameRef.current = window.requestAnimationFrame(() => {
+    // Expansion has to be instant; collapse must not be. iOS does not move
+    // focus to a button when you tap one, so tapping any of the composer's own
+    // controls blurs the editor and leaves focus on the document — which looks
+    // exactly like leaving the composer. Collapsing on the next frame therefore
+    // unmounted the control being pressed before its click was dispatched, and
+    // every expanded-only button (attach, voice, the actions menu) became dead
+    // while the keyboard was up. Waiting lets the click land first; the checks
+    // below still decide whether the collapse was right.
+    pendingFocusLossFrameRef.current = window.setTimeout(() => {
       pendingFocusLossFrameRef.current = null;
       const composerElement = composerInteractionRef.current;
       if (!composerElement) return;
 
       // Focus events for the element losing focus run before the browser has
-      // assigned the next active element. Waiting one frame makes collapse a
-      // decision about settled focus instead of about pointer intent.
+      // assigned the next active element, so this is a decision about settled
+      // focus rather than about pointer intent.
       if (composerElement.contains(document.activeElement)) return;
 
       // Responsive popovers and dropdowns portal their content outside the
@@ -405,7 +419,7 @@ function FollowUpPromptBoxWithComposer({
         return;
       }
       setIsComposerFocused(false);
-    });
+    }, COMPOSER_COLLAPSE_SETTLE_MS);
   }, [cancelPendingFocusLoss]);
   useEffect(() => cancelPendingFocusLoss, [cancelPendingFocusLoss]);
   const compactConfig = useMemo(
