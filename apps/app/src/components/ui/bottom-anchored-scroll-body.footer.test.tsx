@@ -94,20 +94,50 @@ describe("BottomAnchoredScrollBody footer", () => {
   it("brings the footer back when swiping the other way", () => {
     const { footer, scrollTo } = renderBody();
     scrollTo(800);
-    scrollTo(700);
+    scrollTo(500);
     expect(footer.hasAttribute("data-hidden")).toBe(true);
 
-    scrollTo(800);
+    // Returning is cheaper than leaving, so a much shorter swipe suffices.
+    scrollTo(600);
     expect(footer.hasAttribute("data-hidden")).toBe(false);
   });
 
   it("always shows the footer near the end of the transcript", () => {
     const { footer, scrollTo } = renderBody();
     scrollTo(800);
-    scrollTo(700);
+    scrollTo(500);
     expect(footer.hasAttribute("data-hidden")).toBe(true);
 
     scrollTo(MAX_SCROLL_TOP);
+    expect(footer.hasAttribute("data-hidden")).toBe(false);
+  });
+
+  it("does not flap while reading back through a thread", () => {
+    // Momentum and rubber-band reverse the scroll direction constantly. With a
+    // symmetric threshold every reversal flipped the composer, so reading a
+    // thread pulsed it in and out the whole way down.
+    const { footer, scrollTo } = renderBody();
+    scrollTo(1200);
+    let position = 1200;
+    for (let step = 0; step < 6; step += 1) {
+      position -= 90;
+      scrollTo(position);
+      position += 40;
+      scrollTo(position);
+      expect(footer.hasAttribute("data-hidden")).toBe(false);
+    }
+  });
+
+  it("leaves the composer alone when there is barely anything to scroll", () => {
+    const { scrollArea, footer, scrollTo } = renderBody();
+    Object.defineProperty(scrollArea, "scrollHeight", {
+      configurable: true,
+      value: CLIENT_HEIGHT + 300,
+    });
+
+    scrollTo(280);
+    scrollTo(0);
+
     expect(footer.hasAttribute("data-hidden")).toBe(false);
   });
 

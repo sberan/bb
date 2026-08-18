@@ -80,10 +80,22 @@ interface ElementVisibilityArgs {
 }
 
 const BOTTOM_ANCHOR_THRESHOLD_PX = 4;
-/** Scroll travel in one direction before the composer hides or reappears. */
-const FOOTER_VISIBILITY_TRAVEL_PX = 48;
+/**
+ * Hiding takes a deliberate pull. The thresholds are deliberately asymmetric:
+ * a symmetric pair meant any direction change flipped the composer, so reading
+ * back through a thread — where momentum and rubber-band reverse the direction
+ * constantly — flapped it in and out the whole way.
+ */
+const FOOTER_HIDE_TRAVEL_PX = 220;
+/** Coming back is cheap: the composer should return the moment you want it. */
+const FOOTER_SHOW_TRAVEL_PX = 64;
 /** Within this much of the end, the composer is always shown. */
 const FOOTER_REVEAL_BOTTOM_PX = 96;
+/**
+ * Never hide until there is a real transcript above to gain by it. Below this,
+ * the composer is most of what you are looking at and hiding it just churns.
+ */
+const FOOTER_HIDE_MIN_SCROLLABLE_PX = 600;
 const USER_SCROLL_INTENT_MS = 1_000;
 const SCROLLBAR_IDLE_DELAY_MS = 600;
 // ResizeObserver can fire before related flex/sidebar/prompt layout settles.
@@ -666,16 +678,18 @@ export function BottomAnchoredScrollBody({
     hideGestureTravelRef.current =
       Math.sign(travel) === Math.sign(delta) ? travel + delta : delta;
 
-    if (getMaxScrollOffset(scrollArea) - scrollTop <= FOOTER_REVEAL_BOTTOM_PX) {
+    const maxScrollTop = getMaxScrollOffset(scrollArea);
+    if (maxScrollTop - scrollTop <= FOOTER_REVEAL_BOTTOM_PX) {
       hideGestureTravelRef.current = 0;
       setIsFooterHidden(false);
       return;
     }
-    if (hideGestureTravelRef.current >= FOOTER_VISIBILITY_TRAVEL_PX) {
+    if (hideGestureTravelRef.current >= FOOTER_SHOW_TRAVEL_PX) {
       setIsFooterHidden(false);
       return;
     }
-    if (hideGestureTravelRef.current > -FOOTER_VISIBILITY_TRAVEL_PX) return;
+    if (hideGestureTravelRef.current > -FOOTER_HIDE_TRAVEL_PX) return;
+    if (maxScrollTop < FOOTER_HIDE_MIN_SCROLLABLE_PX) return;
     const footerElement = footerRef.current;
     if (footerElement?.contains(document.activeElement)) return;
     setIsFooterHidden(true);
